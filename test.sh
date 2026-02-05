@@ -89,8 +89,7 @@ echo "==> Write FINAL Nginx config (matches your desired structure)"
 sudo tee "/etc/nginx/sites-available/$DOMAIN" >/dev/null <<EOF
 # HTTPS server for main domain
 server {
-    listen 443 ssl;
-    http2 on;
+    listen 443 ssl http2;
     server_name $DOMAIN;
 
     client_max_body_size 250M;
