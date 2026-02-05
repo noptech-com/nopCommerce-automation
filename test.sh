@@ -242,3 +242,6 @@ sudo systemctl reload nginx
 
 echo "DONE: https://$DOMAIN"
 REMOTE
+
+sudo bash /tmp/nop_provision.sh "$DOMAIN" "$DB_NAME" "$DB_USER" "$DB_PASS" "$ADMIN_EMAIL" "$ADMIN_PASS_HASH" "$ADMIN_SALT"
+rm -f /tmp/nop_provision.sh
