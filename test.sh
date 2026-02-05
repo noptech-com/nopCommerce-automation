@@ -202,7 +202,7 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now "nopCommerce-$DOMAIN.service"
 
 echo "==> Configure appsettings.json for PostgreSQL + proxy"
-APPSET="$(find "$NOP_DIR" -maxdepth 3 -type f -iname 'appsettings.json' | head -n 1)"
+APPSET="$(find "$NOP_DIR" -type f -iname 'appsettings.json' | head -n 1)"
 echo "Using appsettings: $APPSET"
 [[ -f "$APPSET" ]] || { echo "ERROR: appsettings.json not found under $NOP_DIR"; exit 1; }
 
