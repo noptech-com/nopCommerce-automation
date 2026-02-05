@@ -14,8 +14,6 @@ ADMIN_EMAIL="$5"
 ADMIN_PASS_HASH="${6:-}"
 ADMIN_SALT="${7:-}"
 
-REMOTE_SCRIPT="/tmp/nop_provision.sh"
-
 cat > /tmp/nop_provision.sh <<'REMOTE'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -34,11 +32,11 @@ ADMIN_PASS_HASH="${6:-}"
 ADMIN_SALT="${7:-}"
 
 SERVER_IP="$(curl -4 -s ifconfig.me || true)"
-
 export DEBIAN_FRONTEND=noninteractive
 
 wait_dpkg_lock() {
   while sudo fuser /var/lib/dpkg/lock >/dev/null 2>&1; do sleep 1; done
+  while sudo fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1; do sleep 1; done
   while sudo fuser /var/lib/apt/lists/lock >/dev/null 2>&1; do sleep 1; done
   while sudo fuser /var/cache/apt/archives/lock >/dev/null 2>&1; do sleep 1; done
 }
@@ -60,6 +58,7 @@ sudo apt-get install -y apt-transport-https aspnetcore-runtime-9.0
 
 NOP_DIR="/var/www/$DOMAIN"
 
+# ---------- NGINX + CERTBOT ----------
 echo "==> Prepare Nginx (temporary HTTP only for certbot)"
 sudo tee "/etc/nginx/sites-available/$DOMAIN" >/dev/null <<EOF
 server {
@@ -78,18 +77,22 @@ server {
 EOF
 
 sudo ln -sf "/etc/nginx/sites-available/$DOMAIN" "/etc/nginx/sites-enabled/$DOMAIN"
+sudo rm -f /etc/nginx/sites-enabled/default || true
 sudo nginx -t
 sudo systemctl reload nginx
 
 echo "==> Obtain LetsEncrypt certificate (domain)"
-sudo certbot --nginx -d "$DOMAIN" \
+sudo certbot --nginx -d "$DOMAIN" -d "www.$DOMAIN" \
   --redirect --agree-tos --no-eff-email -m "$ADMIN_EMAIL"
 
-echo "==> Write FINAL Nginx config (matches your desired structure)"
+echo "==> Write FINAL Nginx config"
+# IMPORTANT: Ubuntu 20.04 nginx doesn’t support `listen ... http2;` in all builds.
+# Use `http2 on;` inside the server block instead (safe on newer too).
 sudo tee "/etc/nginx/sites-available/$DOMAIN" >/dev/null <<EOF
 # HTTPS server for main domain
 server {
-    listen 443 ssl http2;
+    listen 443 ssl;
+    http2 on;
     server_name $DOMAIN;
 
     client_max_body_size 250M;
@@ -110,8 +113,8 @@ server {
 
 # Redirect www to non-www
 server {
-    listen 80;
     listen 443 ssl;
+    http2 on;
     server_name www.$DOMAIN;
 
     ssl_certificate /etc/letsencrypt/live/$DOMAIN/fullchain.pem;
@@ -122,23 +125,24 @@ server {
     return 301 https://$DOMAIN\$request_uri;
 }
 
-# HTTP to HTTPS redirect for base domain
+# HTTP to HTTPS redirect for base + www
 server {
     listen 80;
-    server_name $DOMAIN;
-
+    server_name $DOMAIN www.$DOMAIN;
     return 301 https://$DOMAIN\$request_uri;
 }
 
-# Redirect direct IP access to domain
+# Redirect direct IP access to domain (HTTP)
 server {
     listen 80;
     server_name $SERVER_IP;
     return 301 https://$DOMAIN\$request_uri;
 }
 
+# Redirect direct IP access to domain (HTTPS)
 server {
     listen 443 ssl;
+    http2 on;
     server_name $SERVER_IP;
 
     ssl_certificate /etc/letsencrypt/live/$DOMAIN/fullchain.pem;
@@ -153,34 +157,47 @@ EOF
 sudo nginx -t
 sudo systemctl reload nginx
 
-echo "==> PostgreSQL: create user/db (no SUPERUSER)"
+# ---------- POSTGRES ----------
+echo "==> PostgreSQL: create user/db + extensions (correct ownership)"
+
+sudo systemctl enable --now postgresql
+
+# user
 sudo -u postgres psql -tc "SELECT 1 FROM pg_roles WHERE rolname='$DB_USER'" | grep -q 1 || \
   sudo -u postgres psql -c "CREATE USER $DB_USER WITH PASSWORD '$DB_PASS';"
 
+# database (owner = app user)
 sudo -u postgres psql -tc "SELECT 1 FROM pg_database WHERE datname='$DB_NAME'" | grep -q 1 || \
-  sudo -u postgres psql -c "CREATE DATABASE $DB_NAME WITH OWNER $DB_USER;"
+  sudo -u postgres psql -c "CREATE DATABASE $DB_NAME OWNER $DB_USER;"
 
-sudo -u postgres psql -c "GRANT ALL PRIVILEGES ON DATABASE $DB_NAME TO $DB_USER;"
-
+# extensions must be created by postgres
 sudo -u postgres psql -d "$DB_NAME" -c "CREATE EXTENSION IF NOT EXISTS citext;"
 sudo -u postgres psql -d "$DB_NAME" -c "CREATE EXTENSION IF NOT EXISTS pgcrypto;"
 
+# critical: make app user owner of extensions so restore/import won’t fail
+sudo -u postgres psql -d "$DB_NAME" -c "ALTER EXTENSION citext OWNER TO $DB_USER;"
+sudo -u postgres psql -d "$DB_NAME" -c "ALTER EXTENSION pgcrypto OWNER TO $DB_USER;"
+
+# ---------- NOPCOMMERCE FILES ----------
 echo "==> Download nopCommerce (4.80.3) to $NOP_DIR"
 sudo mkdir -p "$NOP_DIR"
 cd "$NOP_DIR"
+
 if [[ ! -f "Nop.Web.dll" ]]; then
   sudo wget -q https://github.com/nopSolutions/nopCommerce/releases/download/release-4.80.3/nopCommerce_4.80.3_NoSource_linux_x64.zip -O nop.zip
   sudo unzip -qq nop.zip
   sudo rm -f nop.zip
-  sudo mkdir -p bin logs
+  sudo mkdir -p bin logs App_Data
 fi
 
 sudo chown -R www-data:www-data "$NOP_DIR"
 
+# ---------- SYSTEMD ----------
 echo "==> systemd service"
 sudo tee "/etc/systemd/system/nopCommerce-$DOMAIN.service" >/dev/null <<EOF
 [Unit]
 Description=nopCommerce app running for $DOMAIN
+After=network.target postgresql.service
 
 [Service]
 WorkingDirectory=$NOP_DIR
@@ -201,47 +218,61 @@ EOF
 sudo systemctl daemon-reload
 sudo systemctl enable --now "nopCommerce-$DOMAIN.service"
 
+# ---------- APPSETTINGS ----------
 echo "==> Configure appsettings.json for PostgreSQL + proxy"
 APPSET="$NOP_DIR/App_Data/appsettings.json"
+
+# In nopCommerce, appsettings.json is shipped in App_Data in the zip.
+# Still, keep a small wait loop just in case of custom packaging.
 if [[ ! -f "$APPSET" ]]; then
-  echo "Waiting for nopCommerce to generate appsettings.json..."
-  for i in {1..30}; do
+  echo "Waiting for $APPSET to appear..."
+  for _ in {1..30}; do
     [[ -f "$APPSET" ]] && break
-    sleep 2
+    sleep 1
   done
 fi
-[[ -f "$APPSET" ]] || { echo "ERROR: appsettings.json still not found"; exit 1; }
+[[ -f "$APPSET" ]] || { echo "ERROR: appsettings.json not found at $APPSET"; exit 1; }
 
-sudo sed -i -z 's#"ConnectionString": ""#"ConnectionString": "Server=localhost;Database='"$DB_NAME"';User Id='"$DB_USER"';Password='"$DB_PASS"'"#' "$APPSET"
-sudo sed -i 's/sqlserver/postgresql/' "$APPSET"
+# Set DB provider and connection string
+sudo sed -i 's/"DataProvider":\s*".*"/"DataProvider": "postgresql"/' "$APPSET" || true
+sudo sed -i -E 's#"ConnectionString":\s*".*"#"ConnectionString": "Server=localhost;Database='"$DB_NAME"';User Id='"$DB_USER"';Password='"$DB_PASS"'"#' "$APPSET"
 
-sudo sed -i '/"HostingConfig": {/,/}/c\
+# HostingConfig proxy block (best effort; if missing, nop will still work behind nginx)
+if grep -q '"HostingConfig"' "$APPSET"; then
+  sudo sed -i '/"HostingConfig": {/,/}/c\
   "HostingConfig": {\
     "UseProxy": true,\
     "ForwardedProtoHeaderName": "X-Forwarded-Proto",\
     "ForwardedForHeaderName": "X-Forwarded-For",\
     "UseHttpXForwardedProto": "true",\
     "KnownProxies": "",\
-    "KnownNetworks": "",\
-    "Urls": "https://0.0.0.0:5001"\
-  },' "$APPSET"
+    "KnownNetworks": ""\
+  },' "$APPSET" || true
+fi
 
+# ---------- IMPORT DEFAULT DB ----------
 echo "==> Import default DB + set store/admin (if hashes provided)"
 TMP_SQL="/tmp/nopcommerce48_default_db.sql"
 wget -q https://raw.githubusercontent.com/noptech-com/nc-47-postgre-default/refs/heads/main/nopcommerce48_default_db.sql -O "$TMP_SQL"
-sudo -u postgres PGPASSWORD="$DB_PASS" psql -U "$DB_USER" -d "$DB_NAME" -h localhost -f "$TMP_SQL"
+
+# import as app user (now it will not fail on extension ownership)
+sudo -u postgres PGPASSWORD="$DB_PASS" \
+  psql -h localhost -U "$DB_USER" -d "$DB_NAME" -f "$TMP_SQL"
 rm -f "$TMP_SQL"
 
-sudo -u postgres PGPASSWORD="$DB_PASS" psql -U "$DB_USER" -d "$DB_NAME" -h localhost -c "UPDATE \"Store\" SET \"Url\" = 'https://$DOMAIN/' WHERE \"Id\" = 1;"
-sudo -u postgres PGPASSWORD="$DB_PASS" psql -U "$DB_USER" -d "$DB_NAME" -h localhost -c "UPDATE \"Customer\" SET \"Username\" = '$ADMIN_EMAIL' WHERE \"Id\" = 1;"
-sudo -u postgres PGPASSWORD="$DB_PASS" psql -U "$DB_USER" -d "$DB_NAME" -h localhost -c "UPDATE \"Customer\" SET \"Email\" = '$ADMIN_EMAIL' WHERE \"Id\" = 1;"
+sudo -u postgres PGPASSWORD="$DB_PASS" psql -h localhost -U "$DB_USER" -d "$DB_NAME" -c \
+  "UPDATE \"Store\" SET \"Url\" = 'https://$DOMAIN/' WHERE \"Id\" = 1;"
+sudo -u postgres PGPASSWORD="$DB_PASS" psql -h localhost -U "$DB_USER" -d "$DB_NAME" -c \
+  "UPDATE \"Customer\" SET \"Username\" = '$ADMIN_EMAIL', \"Email\" = '$ADMIN_EMAIL' WHERE \"Id\" = 1;"
 
 if [[ -n "$ADMIN_PASS_HASH" ]]; then
-  sudo -u postgres PGPASSWORD="$DB_PASS" psql -U "$DB_USER" -d "$DB_NAME" -h localhost -c "UPDATE \"CustomerPassword\" SET \"Password\" = '$ADMIN_PASS_HASH' WHERE \"Id\" = 1;"
+  sudo -u postgres PGPASSWORD="$DB_PASS" psql -h localhost -U "$DB_USER" -d "$DB_NAME" -c \
+    "UPDATE \"CustomerPassword\" SET \"Password\" = '$ADMIN_PASS_HASH' WHERE \"Id\" = 1;"
 fi
 
 if [[ -n "$ADMIN_SALT" ]]; then
-  sudo -u postgres PGPASSWORD="$DB_PASS" psql -U "$DB_USER" -d "$DB_NAME" -h localhost -c "UPDATE \"CustomerPassword\" SET \"PasswordSalt\" = '$ADMIN_SALT' WHERE \"Id\" = 1;"
+  sudo -u postgres PGPASSWORD="$DB_PASS" psql -h localhost -U "$DB_USER" -d "$DB_NAME" -c \
+    "UPDATE \"CustomerPassword\" SET \"PasswordSalt\" = '$ADMIN_SALT' WHERE \"Id\" = 1;"
 fi
 
 sudo systemctl restart "nopCommerce-$DOMAIN.service"
