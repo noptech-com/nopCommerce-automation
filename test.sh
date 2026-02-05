@@ -81,8 +81,8 @@ sudo ln -sf "/etc/nginx/sites-available/$DOMAIN" "/etc/nginx/sites-enabled/$DOMA
 sudo nginx -t
 sudo systemctl reload nginx
 
-echo "==> Obtain LetsEncrypt certificate (domain + www)"
-sudo certbot --nginx -d "$DOMAIN" -d "www.$DOMAIN" \
+echo "==> Obtain LetsEncrypt certificate (domain)"
+sudo certbot --nginx -d "$DOMAIN" \
   --redirect --agree-tos --no-eff-email -m "$ADMIN_EMAIL"
 
 echo "==> Write FINAL Nginx config (matches your desired structure)"
