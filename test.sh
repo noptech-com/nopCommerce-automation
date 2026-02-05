@@ -1,19 +1,18 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ $# -lt 6 ]]; then
-  echo "Usage: $0 user@server_ip domain db_name db_user db_pass [admin_email] [admin_pass_hash] [admin_salt]"
+if [[ $# -lt 5 ]]; then
+  echo "Usage: $0 domain db_name db_user db_pass admin_email [admin_pass_hash] [admin_salt]"
   exit 1
 fi
 
-SSH_TARGET="$1"
-DOMAIN="$2"
-DB_NAME="$3"
-DB_USER="$4"
-DB_PASS="$5"
-ADMIN_EMAIL="${6:-}"
-ADMIN_PASS_HASH="${7:-}"
-ADMIN_SALT="${8:-}"
+DOMAIN="$1"
+DB_NAME="$2"
+DB_USER="$3"
+DB_PASS="$4"
+ADMIN_EMAIL="$5"
+ADMIN_PASS_HASH="${6:-}"
+ADMIN_SALT="${7:-}"
 
 REMOTE_SCRIPT="/tmp/nop_provision.sh"
 
