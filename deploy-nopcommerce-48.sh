@@ -164,7 +164,7 @@ sed -i '/"HostingConfig": {/,/}/c\
     "Urls": "https://0.0.0.0:5001"\
   },' $nopcommerce_directory/App_Data/appsettings.json
 
-wget https://raw.githubusercontent.com/noptech-com/nc-47-postgre-default/refs/heads/main/nopcommerce48_default_db.sql
+wget https://raw.githubusercontent.com/noptech-com/nopCommerce-automation/refs/heads/main/nopcommerce48_default_db.sql
 sudo -u postgres PGPASSWORD=$database_password psql -U $database_user -d $database_name -h localhost -f nopcommerce48_default_db.sql
 sudo -u postgres PGPASSWORD=$database_password psql -U $database_user -d $database_name -h localhost -c "UPDATE \"Store\" SET \"Url\" = 'https://$domain_name/' WHERE \"Id\" = 1;"
 sudo -u postgres PGPASSWORD=$database_password psql -U $database_user -d $database_name -h localhost -c "UPDATE \"Customer\" SET \"Username\" = '$nopCommerceEmail' WHERE \"Id\" = 1;"
