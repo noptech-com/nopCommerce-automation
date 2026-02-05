@@ -157,23 +157,28 @@ sudo systemctl reload nginx
 # ---------- POSTGRES ----------
 echo "==> PostgreSQL: create user/db + extensions (correct ownership)"
 
-sudo systemctl enable --now postgresql
+# PostgreSQL service
+sudo systemctl enable --now postgresql || true
+sudo systemctl start postgresql || true
 
-# user
+# user (quote-нато, за да не гърми при странни имена)
 sudo -u postgres psql -tc "SELECT 1 FROM pg_roles WHERE rolname='$DB_USER'" | grep -q 1 || \
-  sudo -u postgres psql -c "CREATE USER $DB_USER WITH PASSWORD '$DB_PASS';"
+  sudo -u postgres psql -c "CREATE USER \"$DB_USER\" WITH PASSWORD '$DB_PASS';"
 
 # database (owner = app user)
 sudo -u postgres psql -tc "SELECT 1 FROM pg_database WHERE datname='$DB_NAME'" | grep -q 1 || \
-  sudo -u postgres psql -c "CREATE DATABASE $DB_NAME OWNER $DB_USER;"
+  sudo -u postgres psql -c "CREATE DATABASE \"$DB_NAME\" OWNER \"$DB_USER\";"
 
-# extensions must be created by postgres
+# make sure ownership is correct (idempotent)
+sudo -u postgres psql -c "ALTER DATABASE \"$DB_NAME\" OWNER TO \"$DB_USER\";"
+sudo -u postgres psql -d "$DB_NAME" -c "ALTER SCHEMA public OWNER TO \"$DB_USER\";"
+
+# extensions must be created by postgres (superuser)
 sudo -u postgres psql -d "$DB_NAME" -c "CREATE EXTENSION IF NOT EXISTS citext;"
 sudo -u postgres psql -d "$DB_NAME" -c "CREATE EXTENSION IF NOT EXISTS pgcrypto;"
 
-# critical: make app user owner of extensions so restore/import won’t fail
-sudo -u postgres psql -d "$DB_NAME" -c "ALTER EXTENSION citext OWNER TO $DB_USER;"
-sudo -u postgres psql -d "$DB_NAME" -c "ALTER EXTENSION pgcrypto OWNER TO $DB_USER;"
+# allow app user to work in public schema (common requirement)
+sudo -u postgres psql -d "$DB_NAME" -c "GRANT USAGE, CREATE ON SCHEMA public TO \"$DB_USER\";"
 
 # ---------- NOPCOMMERCE FILES ----------
 echo "==> Download nopCommerce (4.80.3) to $NOP_DIR"
