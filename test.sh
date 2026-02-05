@@ -91,8 +91,7 @@ echo "==> Write FINAL Nginx config"
 sudo tee "/etc/nginx/sites-available/$DOMAIN" >/dev/null <<EOF
 # HTTPS server for main domain
 server {
-    listen 443 ssl;
-    http2 on;
+    listen 443 ssl http2;
     server_name $DOMAIN;
 
     client_max_body_size 250M;
@@ -113,8 +112,7 @@ server {
 
 # Redirect www to non-www
 server {
-    listen 443 ssl;
-    http2 on;
+    listen 443 ssl http2;
     server_name www.$DOMAIN;
 
     ssl_certificate /etc/letsencrypt/live/$DOMAIN/fullchain.pem;
@@ -141,8 +139,7 @@ server {
 
 # Redirect direct IP access to domain (HTTPS)
 server {
-    listen 443 ssl;
-    http2 on;
+    listen 443 ssl http2;
     server_name $SERVER_IP;
 
     ssl_certificate /etc/letsencrypt/live/$DOMAIN/fullchain.pem;
