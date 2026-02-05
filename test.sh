@@ -202,7 +202,9 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now "nopCommerce-$DOMAIN.service"
 
 echo "==> Configure appsettings.json for PostgreSQL + proxy"
-APPSET="$NOP_DIR/App_Data/appsettings.json"
+APPSET="$(find "$NOP_DIR" -maxdepth 3 -type f -iname 'appsettings.json' | head -n 1)"
+echo "Using appsettings: $APPSET"
+[[ -f "$APPSET" ]] || { echo "ERROR: appsettings.json not found under $NOP_DIR"; exit 1; }
 
 sudo sed -i -z 's#"ConnectionString": ""#"ConnectionString": "Server=localhost;Database='"$DB_NAME"';User Id='"$DB_USER"';Password='"$DB_PASS"'"#' "$APPSET"
 sudo sed -i 's/sqlserver/postgresql/' "$APPSET"
