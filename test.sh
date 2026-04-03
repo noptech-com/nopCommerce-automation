@@ -118,14 +118,37 @@ db_sql_url="https://raw.githubusercontent.com/noptech-com/nopCommerce-automation
 
 echo -e "${YELLOW}[2/8] Инсталиране на .NET runtime ($dotnet_runtime_pkg) и зависимости...${NC}"
 
+# Removing potentially unnecessery repositories
+sudo add-apt-repository --remove ppa:dotnet/backports -y
+
 wget https://packages.microsoft.com/config/ubuntu/$RELEASE_VERSION/packages-microsoft-prod.deb -O packages-microsoft-prod.deb
 while sudo fuser /var/lib/dpkg/lock >/dev/null 2>&1; do sleep 1; done
 sudo dpkg -i packages-microsoft-prod.deb
 export DEBIAN_FRONTEND=noninteractive
 while sudo fuser /var/lib/dpkg/lock >/dev/null 2>&1; do sleep 1; done
-sudo apt-get update
+sudo apt-get update || true
 while sudo fuser /var/lib/dpkg/lock >/dev/null 2>&1; do sleep 1; done
-sudo DEBIAN_FRONTEND=noninteractive apt-get install -y apt-transport-https "$dotnet_runtime_pkg"
+sudo DEBIAN_FRONTEND=noninteractive apt-get install -y apt-transport-https
+
+# Ofc. repo may not contain dotnet runtime, in that case install from the Ubuntu .NET backports package repository
+if ! sudo DEBIAN_FRONTEND=noninteractive apt-get install -y "$dotnet_runtime_pkg"; then
+  sudo dpkg -r packages-microsoft-prod
+  while sudo fuser /var/lib/dpkg/lock >/dev/null 2>&1 || \
+      sudo fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1; do
+    sleep 1
+  done
+  sudo add-apt-repository ppa:dotnet/backports -y
+  sudo apt-get update || true
+  while sudo fuser /var/lib/dpkg/lock >/dev/null 2>&1 || \
+      sudo fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1; do
+    sleep 1
+  done
+  sudo DEBIAN_FRONTEND=noninteractive apt-get install -y "$dotnet_runtime_pkg"
+  if [ $? -ne 0 ]; then
+    echo "Could not install $dotnet_runtime_pkg | status code $?"
+    exit 1
+  fi
+fi
 echo "postfix postfix/main_mailer_type select Internet Site" | sudo -s debconf-set-selections
 echo "postfix postfix/mailname string $(hostname --fqdn)" | sudo -s debconf-set-selections
 while sudo fuser /var/lib/dpkg/lock >/dev/null 2>&1; do sleep 1; done
@@ -144,7 +167,7 @@ echo -e "${YELLOW}[3/8] Инсталиране и базова конфигур�
 
 nopcommerce_directory="/var/www/$domain_name"
 
-sudo apt update
+sudo apt update || true
 sudo apt install -y nginx
 
 # Начална nginx конфигурация (само port 80) - нужна за certbot challenge
@@ -304,8 +327,35 @@ if [ "$db_type" = "postgres" ]; then
   sudo -u postgres psql -c "ALTER USER $USER_QUOTED WITH SUPERUSER;"
 elif [ "$db_type" = "mysql" ]; then
   sudo DEBIAN_FRONTEND=noninteractive apt-get install -y mysql-server
+
+  # Switch to lower case mode: Need to reinitialize MySQL
+
+  # 1. Recreate datadir
+  sudo systemctl stop mysql
+  sudo rm -rf /var/lib/mysql && sudo mkdir /var/lib/mysql
+  sudo chown mysql:mysql /var/lib/mysql
+  sudo chmod 750 /var/lib/mysql
+
+  # 2. Edit config to lower case
+  sudo bash -c "echo 'lower_case_table_names=1' >>  /etc/mysql/mysql.conf.d/mysqld.cnf"
+
+  # 3. Reinitialize
+  sudo mysqld --defaults-file=/etc/mysql/my.cnf --initialize --user=mysql --lower-case-table-names=1
   sudo systemctl enable mysql
   sudo systemctl start mysql
+  
+  # 4. Configure authentication
+  TEMP_PWD=$(grep "temporary password is generated for root@localhost" /var/log/mysql/error.log | tail -n 1 | sed 's/.*: //')
+  export MYSQL_PWD="$TEMP_PWD"
+  sudo -E mysql --connect-expired-password -u root -e "ALTER USER 'root'@'localhost' IDENTIFIED BY '$database_password';"
+  sudo mysql -u root -p"$database_password" <<EOF
+INSTALL PLUGIN auth_socket SONAME 'auth_socket.so';
+ALTER USER 'root'@'localhost' IDENTIFIED WITH auth_socket;
+FLUSH PRIVILEGES;
+EOF
+
+  unset MYSQL_PWD
+
 
   # Създаваме база и потребител за MySQL
   sudo mysql -e "CREATE DATABASE IF NOT EXISTS \`$database_name\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
@@ -319,6 +369,7 @@ elif [ "$db_type" = "mssql" ]; then
   MSSQL_PID="Express"
 
   curl https://packages.microsoft.com/keys/microsoft.asc | sudo tee /etc/apt/trusted.gpg.d/microsoft.asc >/dev/null
+  sudo curl -sSL https://packages.microsoft.com/keys/microsoft.asc | sudo gpg --barch --yes --dearmor -o /usr/share/keyrings/microsoft-prod.gpg
 
   # Инсталираме инструментите sqlcmd (пълният път се ползва по-долу)
   if [ ! -x /opt/mssql-tools/bin/sqlcmd ]; then
@@ -327,14 +378,42 @@ elif [ "$db_type" = "mssql" ]; then
     while sudo fuser /var/lib/dpkg/lock >/dev/null 2>&1; do echo -e "${YELLOW}  [MSSQL] Изчакване dpkg lock...${NC}"; sleep 5; done
     sudo apt-get update
     while sudo fuser /var/lib/dpkg/lock >/dev/null 2>&1; do echo -e "${YELLOW}  [MSSQL] Изчакване dpkg lock...${NC}"; sleep 5; done
-    sudo ACCEPT_EULA=Y apt-get install -y mssql-tools unixodbc-dev
-    echo 'export PATH="$PATH:/opt/mssql-tools/bin"' | sudo tee /etc/profile.d/mssql-tools.sh >/dev/null
+    if [ "$(printf '%s\n' "24.04" "$RELEASE_VERSION" | sort -V | head -n1)" = "24.04" ]; then
+      sudo curl -sSL https://packages.microsoft.com/keys/microsoft.asc | sudo gpg --barch --yes --dearmor -o /usr/share/keyrings/microsoft-prod.gpg
+      sudo apt-get update
+      while sudo fuser /var/lib/dpkg/lock >/dev/null 2>&1 || \
+        sudo fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1; do
+        sleep 1
+      done
+      sudo ACCEPT_EULA=Y apt-get install -y mssql-tools18 unixodbc-dev
+      echo 'export PATH="$PATH:/opt/mssql-tools18/bin"'  >> ~/.bashrc > /dev/null
+      sudo ln -s /opt/mssql-tools18 /opt/mssql-tools
+      source ~/.bashrc
+    else
+      sudo ACCEPT_EULA=Y apt-get install -y mssql-tools unixodbc-dev
+      echo 'export PATH="$PATH:/opt/mssql-tools/bin"' | sudo tee /etc/profile.d/mssql-tools.sh >/dev/null
+    fi
   fi
 
   # Инсталираме SQL Server само ако още не е наличен
   if ! systemctl status mssql-server >/dev/null 2>&1; then
+    case "$RELEASE_VERSION" in
+      "20.04")
+          MSSQL_SERVER_VERSION=mssql-server-2019.list
+          ;;
+      "22.04")
+          MSSQL_SERVER_VERSION=mssql-server-2025.list
+          ;;
+      "24.04" | "25.10")
+          MSSQL_SERVER_VERSION=mssql-server-2025.list
+          ;;
+      *)
+          # Дефолтный вариант для всех остальных
+          MSSQL_SERVER_VERSION=mssql-server-2019.list
+          ;;
+    esac
     echo -e "${YELLOW}  [MSSQL] Инсталиране на mssql-server...${NC}"
-    curl https://packages.microsoft.com/config/ubuntu/$RELEASE_VERSION/mssql-server-2019.list | sudo tee /etc/apt/sources.list.d/mssql-server-2019.list >/dev/null
+    curl https://packages.microsoft.com/config/ubuntu/$RELEASE_VERSION/$MSSQL_SERVER_VERSION | sudo tee /etc/apt/sources.list.d/$MSSQL_SERVER_VERSION >/dev/null
     while sudo fuser /var/lib/dpkg/lock >/dev/null 2>&1; do echo -e "${YELLOW}  [MSSQL] Изчакване освобождаване на dpkg lock...${NC}"; sleep 5; done
     sudo apt-get update
     while sudo fuser /var/lib/dpkg/lock >/dev/null 2>&1; do echo -e "${YELLOW}  [MSSQL] Изчакване освобождаване на dpkg lock...${NC}"; sleep 5; done
@@ -354,7 +433,7 @@ elif [ "$db_type" = "mssql" ]; then
     # Check if DBMS is running and accepts connections (If it accepts connections, then we can stop in gracefully)
     # We make up to 10 attempts which is more then enough for mssql-server to boot
     for i in {1..10}; do
-        /opt/mssql-tools/bin/sqlcmd -S localhost -U sa -P "$MSSQL_SA_PASSWORD" -Q "SELECT 1" > /dev/null 2>&1
+        /opt/mssql-tools/bin/sqlcmd -S localhost -U sa -P "$MSSQL_SA_PASSWORD" -C -Q "SELECT 1" > /dev/null 2>&1
         if [ $? -eq 0 ]; then
             echo "SQL Server is UP and Ready!"
             break
@@ -374,7 +453,7 @@ elif [ "$db_type" = "mssql" ]; then
   while [ $COUNTER -le 24 ] && [ $ERRSTATUS -ne 0 ]; do
     echo -e "${YELLOW}  [MSSQL] Опит $COUNTER/24...${NC}"
     sleep 5
-    /opt/mssql-tools/bin/sqlcmd -S localhost -U sa -P "$MSSQL_SA_PASSWORD" -Q "SELECT 1" >/dev/null 2>&1
+    /opt/mssql-tools/bin/sqlcmd -S localhost -U sa -P "$MSSQL_SA_PASSWORD" -C -Q "SELECT 1" >/dev/null 2>&1
     ERRSTATUS=$?
     COUNTER=$((COUNTER+1))
   done
@@ -387,9 +466,9 @@ elif [ "$db_type" = "mssql" ]; then
 
   # Създаваме login, база и db_owner потребител за nopCommerce
   echo -e "${YELLOW}  [MSSQL] Създаване на login, база и db_owner потребител...${NC}"
-  /opt/mssql-tools/bin/sqlcmd -S localhost -U sa -P "$MSSQL_SA_PASSWORD" -Q "IF NOT EXISTS (SELECT * FROM sys.server_principals WHERE name = N'$database_user') CREATE LOGIN [$database_user] WITH PASSWORD = N'$database_password';"
-  /opt/mssql-tools/bin/sqlcmd -S localhost -U sa -P "$MSSQL_SA_PASSWORD" -Q "IF DB_ID(N'$database_name') IS NULL CREATE DATABASE [$database_name];"
-  /opt/mssql-tools/bin/sqlcmd -S localhost -U sa -P "$MSSQL_SA_PASSWORD" -d "$database_name" -Q "IF NOT EXISTS (SELECT * FROM sys.database_principals WHERE name = N'$database_user') CREATE USER [$database_user] FOR LOGIN [$database_user]; ALTER ROLE [db_owner] ADD MEMBER [$database_user];"
+  /opt/mssql-tools/bin/sqlcmd -S localhost -U sa -P "$MSSQL_SA_PASSWORD" -C -Q "IF NOT EXISTS (SELECT * FROM sys.server_principals WHERE name = N'$database_user') CREATE LOGIN [$database_user] WITH PASSWORD = N'$database_password';"
+  /opt/mssql-tools/bin/sqlcmd -S localhost -U sa -P "$MSSQL_SA_PASSWORD" -C -Q "IF DB_ID(N'$database_name') IS NULL CREATE DATABASE [$database_name];"
+  /opt/mssql-tools/bin/sqlcmd -S localhost -U sa -P "$MSSQL_SA_PASSWORD" -C -d "$database_name" -Q "IF NOT EXISTS (SELECT * FROM sys.database_principals WHERE name = N'$database_user') CREATE USER [$database_user] FOR LOGIN [$database_user]; ALTER ROLE [db_owner] ADD MEMBER [$database_user];"
 fi
 
 echo -e "${YELLOW}[6/8] Сваляне и разархивиране на nopCommerce...${NC}"
@@ -558,20 +637,20 @@ if [ "$db_type" = "postgres" ]; then
   sudo -u postgres PGPASSWORD=$database_password psql -U "$database_user" -d "$database_name" -h localhost -c "UPDATE \"CustomerPassword\" SET \"PasswordSalt\" = '$nopCommercePasswordSalt' WHERE \"Id\" = 1;"
 elif [ "$db_type" = "mysql" ]; then
   sudo mysql "$database_name" < "$db_sql_file"
-  sudo mysql -e "UPDATE Store SET Url = 'https://$domain_name/' WHERE Id = 1;" "$database_name"
-  sudo mysql -e "UPDATE Customer SET Username = '$nopCommerceEmail' WHERE Id = 1;" "$database_name"
-  sudo mysql -e "UPDATE Customer SET Email = '$nopCommerceEmail' WHERE Id = 1;" "$database_name"
-  sudo mysql -e "UPDATE CustomerPassword SET Password = '$nopCommercePassword' WHERE Id = 1;" "$database_name"
-  sudo mysql -e "UPDATE CustomerPassword SET PasswordSalt = '$nopCommercePasswordSalt' WHERE Id = 1;" "$database_name"
+  sudo mysql -e "UPDATE store SET Url = 'https://$domain_name/' WHERE Id = 1;" "$database_name"
+  sudo mysql -e "UPDATE customer SET Username = '$nopCommerceEmail' WHERE Id = 1;" "$database_name"
+  sudo mysql -e "UPDATE customer SET Email = '$nopCommerceEmail' WHERE Id = 1;" "$database_name"
+  sudo mysql -e "UPDATE customerpassword SET Password = '$nopCommercePassword' WHERE Id = 1;" "$database_name"
+  sudo mysql -e "UPDATE customerpassword SET PasswordSalt = '$nopCommercePasswordSalt' WHERE Id = 1;" "$database_name"
 elif [ "$db_type" = "mssql" ]; then
   # sed -E -i "s/\bdbo\b/${database_name}/g" "$db_sql_file"
   # sed -E -i "s/\bdbo_log\b/${database_name}_log/g" "$db_sql_file"
-  /opt/mssql-tools/bin/sqlcmd -S localhost -U sa -P "$database_password" -d "$database_name" -i "$db_sql_file"
-  /opt/mssql-tools/bin/sqlcmd -S localhost -U sa -P "$database_password" -d "$database_name" -Q "UPDATE [Store] SET [Url] = 'https://$domain_name/' WHERE [Id] = 1;"
-  /opt/mssql-tools/bin/sqlcmd -S localhost -U sa -P "$database_password" -d "$database_name" -Q "UPDATE [Customer] SET [Username] = '$nopCommerceEmail' WHERE [Id] = 1;"
-  /opt/mssql-tools/bin/sqlcmd -S localhost -U sa -P "$database_password" -d "$database_name" -Q "UPDATE [Customer] SET [Email] = '$nopCommerceEmail' WHERE [Id] = 1;"
-  /opt/mssql-tools/bin/sqlcmd -S localhost -U sa -P "$database_password" -d "$database_name" -Q "UPDATE [CustomerPassword] SET [Password] = '$nopCommercePassword' WHERE [Id] = 1;"
-  /opt/mssql-tools/bin/sqlcmd -S localhost -U sa -P "$database_password" -d "$database_name" -Q "UPDATE [CustomerPassword] SET [PasswordSalt] = '$nopCommercePasswordSalt' WHERE [Id] = 1;"
+  /opt/mssql-tools/bin/sqlcmd -S localhost -U sa -P "$database_password" -C -d "$database_name" -i "$db_sql_file"
+  /opt/mssql-tools/bin/sqlcmd -S localhost -U sa -P "$database_password" -C -d "$database_name" -Q "UPDATE [Store] SET [Url] = 'https://$domain_name/' WHERE [Id] = 1;"
+  /opt/mssql-tools/bin/sqlcmd -S localhost -U sa -P "$database_password" -C -d "$database_name" -Q "UPDATE [Customer] SET [Username] = '$nopCommerceEmail' WHERE [Id] = 1;"
+  /opt/mssql-tools/bin/sqlcmd -S localhost -U sa -P "$database_password" -C -d "$database_name" -Q "UPDATE [Customer] SET [Email] = '$nopCommerceEmail' WHERE [Id] = 1;"
+  /opt/mssql-tools/bin/sqlcmd -S localhost -U sa -P "$database_password" -C -d "$database_name" -Q "UPDATE [CustomerPassword] SET [Password] = '$nopCommercePassword' WHERE [Id] = 1;"
+  /opt/mssql-tools/bin/sqlcmd -S localhost -U sa -P "$database_password" -C -d "$database_name" -Q "UPDATE [CustomerPassword] SET [PasswordSalt] = '$nopCommercePasswordSalt' WHERE [Id] = 1;"
 fi
 
 rm "$db_sql_file"
