@@ -43,6 +43,14 @@ RELEASE_VERSION=$(grep VERSION_ID /etc/os-release | cut -d '"' -f2)
 # Името на базата = първата част от домейна (преди точката), напр. zetys8ic4tLE за zetys8ic4tLE.nop-tech.com
 database_name=$(echo "$domain_name" | cut -d. -f1)
 
+# www се използва само за root домейни (example.com), не за subdomains (abc.example.com)
+dot_count=$(echo "$domain_name" | tr -cd '.' | wc -c)
+if [ "$dot_count" -ge 2 ]; then
+    has_www=false
+else
+    has_www=true
+fi
+
 nopCommerceEmail=$6
 nopCommercePassword=$7
 nopCommercePasswordSalt=$8
@@ -171,10 +179,16 @@ sudo apt update || true
 sudo apt install -y nginx
 
 # Начална nginx конфигурация (само port 80) - нужна за certbot challenge
+if [ "$has_www" = true ]; then
+    server_name_line="$domain_name www.$domain_name"
+else
+    server_name_line="$domain_name"
+fi
+
 sudo tee /etc/nginx/sites-available/$domain_name <<EOF
 server {
     listen 80;
-    server_name $domain_name www.$domain_name;
+    server_name $server_name_line;
 
     location / {
         proxy_pass http://localhost:5001;
@@ -194,11 +208,17 @@ sudo systemctl restart nginx
 mkdir $nopcommerce_directory
 sudo apt install -y certbot python3-certbot-nginx
 
-# SSL е задължителен - certbot трябва да успее (основен домейн + www)
-echo -e "${YELLOW}Получаване на SSL сертификат за $domain_name и www.$domain_name...${NC}"
+# SSL е задължителен - certbot трябва да успее
+if [ "$has_www" = true ]; then
+    echo -e "${YELLOW}Получаване на SSL сертификат за $domain_name и www.$domain_name...${NC}"
+    certbot_domains="-d $domain_name -d www.$domain_name"
+else
+    echo -e "${YELLOW}Получаване на SSL сертификат за $domain_name (subdomain - без www)...${NC}"
+    certbot_domains="-d $domain_name"
+fi
 
 # Използваме certonly (не пипа nginx конфигурацията, ние я настройваме ръчно по-долу)
-if ! sudo certbot certonly --nginx -d $domain_name -d www.$domain_name --agree-tos --no-eff-email -m office@nop-tech.com --non-interactive; then
+if ! sudo certbot certonly --nginx $certbot_domains --agree-tos --no-eff-email -m office@nop-tech.com --non-interactive; then
     echo -e "${RED}ГРЕШКА: Certbot не успя да получи SSL сертификат!${NC}"
     echo -e "${YELLOW}Проверете: DNS A запис за $domain_name -> $IP и порт 80 е отворен${NC}"
     exit 1
@@ -213,7 +233,7 @@ USE_SSL=true
 
 NGINX_CONFIG="/etc/nginx/sites-available/$domain_name"
 
-# Пълна nginx конфигурация с SSL - основен домейн + www (www винаги се пренасочва към без www)
+# Пълна nginx конфигурация с SSL
 sudo tee "$NGINX_CONFIG" <<EOF
 # HTTPS server for main domain
 server {
@@ -236,6 +256,19 @@ server {
     }
 }
 
+# HTTP to HTTPS redirect for base domain
+server {
+    listen 80;
+    server_name $domain_name;
+
+    return 301 https://$domain_name\$request_uri;
+}
+EOF
+
+# www блокове само за root домейни
+if [ "$has_www" = true ]; then
+sudo tee -a "$NGINX_CONFIG" <<EOF
+
 # HTTPS www -> redirect to main (SSL cert включва и www)
 server {
     listen 443 ssl http2;
@@ -256,15 +289,8 @@ server {
 
     return 301 https://$domain_name\$request_uri;
 }
-
-# HTTP to HTTPS redirect for base domain
-server {
-    listen 80;
-    server_name $domain_name;
-
-    return 301 https://$domain_name\$request_uri;
-}
 EOF
+fi
 
 # IP redirect - само ако IP е получен (избягва server_name празен)
 if [ -n "$IP" ] && [ "$IP" != "localhost" ]; then
