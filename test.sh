@@ -671,9 +671,9 @@ elif [ "$db_type" = "mssql" ]; then
   fi
   # Конвертираме CRLF → LF
   sed -i 's/\r//' "$db_sql_file"
-  # Изтриваме всичко преди първия Object блок (CREATE DATABASE, ALTER DATABASE, USE,
-  # sp_db_vardecimal_storage_format и т.н.) — файлът трябва да почва от CREATE TABLE
-  awk 'found || /^\/\*\*\*\*\*\* Object:/{found=1; print}' "$db_sql_file" > "${db_sql_file}.tmp" && mv "${db_sql_file}.tmp" "$db_sql_file"
+  # Изтриваме целия header (CREATE DATABASE, ALTER DATABASE, USE, sp_db_vardecimal_storage_format и т.н.)
+  # и стартираме от Object-коментара на първата таблица — пропускаме "Object: Database" блока
+  awk 'found || /Object:.*[Tt]able/{found=1; print}' "$db_sql_file" > "${db_sql_file}.tmp" && mv "${db_sql_file}.tmp" "$db_sql_file"
   /opt/mssql-tools/bin/sqlcmd -S localhost -U sa -P "$database_password" -C -d "$database_name" -i "$db_sql_file"
   /opt/mssql-tools/bin/sqlcmd -S localhost -U sa -P "$database_password" -C -d "$database_name" -Q "UPDATE [Store] SET [Url] = 'https://$domain_name/' WHERE [Id] = 1;"
   /opt/mssql-tools/bin/sqlcmd -S localhost -U sa -P "$database_password" -C -d "$database_name" -Q "UPDATE [Customer] SET [Username] = '$nopCommerceEmail' WHERE [Id] = 1;"
