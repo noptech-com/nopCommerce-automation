@@ -43,14 +43,6 @@ RELEASE_VERSION=$(grep VERSION_ID /etc/os-release | cut -d '"' -f2)
 # Името на базата = първата част от домейна (преди точката), напр. zetys8ic4tLE за zetys8ic4tLE.nop-tech.com
 database_name=$(echo "$domain_name" | cut -d. -f1)
 
-# www се използва само за root домейни (example.com), не за subdomains (abc.example.com)
-dot_count=$(echo "$domain_name" | tr -cd '.' | wc -c)
-if [ "$dot_count" -ge 2 ]; then
-    has_www=false
-else
-    has_www=true
-fi
-
 nopCommerceEmail=$6
 nopCommercePassword=$7
 nopCommercePasswordSalt=$8
@@ -202,7 +194,7 @@ sudo systemctl restart nginx
 mkdir $nopcommerce_directory
 sudo apt install -y certbot python3-certbot-nginx
 
-# SSL е задължителен - certbot трябва да успее
+# SSL е задължителен - certbot трябва да успее (основен домейн + www)
 echo -e "${YELLOW}Получаване на SSL сертификат за $domain_name и www.$domain_name...${NC}"
 
 # Използваме certonly (не пипа nginx конфигурацията, ние я настройваме ръчно по-долу)
@@ -221,7 +213,7 @@ USE_SSL=true
 
 NGINX_CONFIG="/etc/nginx/sites-available/$domain_name"
 
-# Пълна nginx конфигурация с SSL
+# Пълна nginx конфигурация с SSL - основен домейн + www (www винаги се пренасочва към без www)
 sudo tee "$NGINX_CONFIG" <<EOF
 # HTTPS server for main domain
 server {
@@ -244,18 +236,7 @@ server {
     }
 }
 
-# HTTP to HTTPS redirect for base domain
-server {
-    listen 80;
-    server_name $domain_name;
-
-    return 301 https://$domain_name\$request_uri;
-}
-EOF
-
-sudo tee -a "$NGINX_CONFIG" <<EOF
-
-# HTTPS www -> redirect to main
+# HTTPS www -> redirect to main (SSL cert включва и www)
 server {
     listen 443 ssl http2;
     server_name www.$domain_name;
@@ -272,6 +253,14 @@ server {
 server {
     listen 80;
     server_name www.$domain_name;
+
+    return 301 https://$domain_name\$request_uri;
+}
+
+# HTTP to HTTPS redirect for base domain
+server {
+    listen 80;
+    server_name $domain_name;
 
     return 301 https://$domain_name\$request_uri;
 }
