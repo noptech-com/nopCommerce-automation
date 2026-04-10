@@ -179,16 +179,10 @@ sudo apt update || true
 sudo apt install -y nginx
 
 # Начална nginx конфигурация (само port 80) - нужна за certbot challenge
-if [ "$has_www" = true ]; then
-    server_name_line="$domain_name www.$domain_name"
-else
-    server_name_line="$domain_name"
-fi
-
 sudo tee /etc/nginx/sites-available/$domain_name <<EOF
 server {
     listen 80;
-    server_name $server_name_line;
+    server_name $domain_name www.$domain_name;
 
     location / {
         proxy_pass http://localhost:5001;
@@ -209,16 +203,10 @@ mkdir $nopcommerce_directory
 sudo apt install -y certbot python3-certbot-nginx
 
 # SSL е задължителен - certbot трябва да успее
-if [ "$has_www" = true ]; then
-    echo -e "${YELLOW}Получаване на SSL сертификат за $domain_name и www.$domain_name...${NC}"
-    certbot_domains="-d $domain_name -d www.$domain_name"
-else
-    echo -e "${YELLOW}Получаване на SSL сертификат за $domain_name (subdomain - без www)...${NC}"
-    certbot_domains="-d $domain_name"
-fi
+echo -e "${YELLOW}Получаване на SSL сертификат за $domain_name и www.$domain_name...${NC}"
 
 # Използваме certonly (не пипа nginx конфигурацията, ние я настройваме ръчно по-долу)
-if ! sudo certbot certonly --nginx $certbot_domains --agree-tos --no-eff-email -m office@nop-tech.com --non-interactive; then
+if ! sudo certbot certonly --nginx -d $domain_name -d www.$domain_name --agree-tos --no-eff-email -m office@nop-tech.com --non-interactive; then
     echo -e "${RED}ГРЕШКА: Certbot не успя да получи SSL сертификат!${NC}"
     echo -e "${YELLOW}Проверете: DNS A запис за $domain_name -> $IP и порт 80 е отворен${NC}"
     exit 1
@@ -265,11 +253,9 @@ server {
 }
 EOF
 
-# www блокове само за root домейни
-if [ "$has_www" = true ]; then
 sudo tee -a "$NGINX_CONFIG" <<EOF
 
-# HTTPS www -> redirect to main (SSL cert включва и www)
+# HTTPS www -> redirect to main
 server {
     listen 443 ssl http2;
     server_name www.$domain_name;
@@ -290,7 +276,6 @@ server {
     return 301 https://$domain_name\$request_uri;
 }
 EOF
-fi
 
 # IP redirect - само ако IP е получен (избягва server_name празен)
 if [ -n "$IP" ] && [ "$IP" != "localhost" ]; then
