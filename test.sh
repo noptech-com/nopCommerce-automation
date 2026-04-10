@@ -43,6 +43,14 @@ RELEASE_VERSION=$(grep VERSION_ID /etc/os-release | cut -d '"' -f2)
 # Името на базата = първата част от домейна (преди точката), напр. zetys8ic4tLE за zetys8ic4tLE.nop-tech.com
 database_name=$(echo "$domain_name" | cut -d. -f1)
 
+# www се използва само за root домейни (example.com), не за subdomains (abc.example.com)
+dot_count=$(echo "$domain_name" | tr -cd '.' | wc -c)
+if [ "$dot_count" -ge 2 ]; then
+    has_www=false
+else
+    has_www=true
+fi
+
 nopCommerceEmail=$6
 nopCommercePassword=$7
 nopCommercePasswordSalt=$8
@@ -194,7 +202,7 @@ sudo systemctl restart nginx
 mkdir $nopcommerce_directory
 sudo apt install -y certbot python3-certbot-nginx
 
-# SSL е задължителен - certbot трябва да успее (основен домейн + www)
+# SSL е задължителен - certbot трябва да успее
 echo -e "${YELLOW}Получаване на SSL сертификат за $domain_name и www.$domain_name...${NC}"
 
 # Използваме certonly (не пипа nginx конфигурацията, ние я настройваме ръчно по-долу)
@@ -213,7 +221,7 @@ USE_SSL=true
 
 NGINX_CONFIG="/etc/nginx/sites-available/$domain_name"
 
-# Пълна nginx конфигурация с SSL - основен домейн + www (www винаги се пренасочва към без www)
+# Пълна nginx конфигурация с SSL
 sudo tee "$NGINX_CONFIG" <<EOF
 # HTTPS server for main domain
 server {
@@ -236,7 +244,18 @@ server {
     }
 }
 
-# HTTPS www -> redirect to main (SSL cert включва и www)
+# HTTP to HTTPS redirect for base domain
+server {
+    listen 80;
+    server_name $domain_name;
+
+    return 301 https://$domain_name\$request_uri;
+}
+EOF
+
+sudo tee -a "$NGINX_CONFIG" <<EOF
+
+# HTTPS www -> redirect to main
 server {
     listen 443 ssl http2;
     server_name www.$domain_name;
@@ -253,14 +272,6 @@ server {
 server {
     listen 80;
     server_name www.$domain_name;
-
-    return 301 https://$domain_name\$request_uri;
-}
-
-# HTTP to HTTPS redirect for base domain
-server {
-    listen 80;
-    server_name $domain_name;
 
     return 301 https://$domain_name\$request_uri;
 }
@@ -623,11 +634,6 @@ sed -i '/"HostingConfig": {/,/}/c\
 wget "$db_sql_url" -O "$db_sql_file"
 echo -e "${YELLOW}[DB] Импорт на default база и начални данни за $db_type...${NC}"
 
-# The .sql files have Windows-like CRLF need to convert it into unix-like
-# sudo apt update && sudo apt install dos2unix
-# dos2unix "$db_sql_file"
-
-
 if [ "$db_type" = "postgres" ]; then
   sudo -u postgres PGPASSWORD=$database_password psql -U "$database_user" -d "$database_name" -h localhost -f "$db_sql_file"
   sudo -u postgres PGPASSWORD=$database_password psql -U "$database_user" -d "$database_name" -h localhost -c "UPDATE \"Store\" SET \"Url\" = 'https://$domain_name/' WHERE \"Id\" = 1;"
@@ -643,8 +649,14 @@ elif [ "$db_type" = "mysql" ]; then
   sudo mysql -e "UPDATE customerpassword SET Password = '$nopCommercePassword' WHERE Id = 1;" "$database_name"
   sudo mysql -e "UPDATE customerpassword SET PasswordSalt = '$nopCommercePasswordSalt' WHERE Id = 1;" "$database_name"
 elif [ "$db_type" = "mssql" ]; then
-  # sed -E -i "s/\bdbo\b/${database_name}/g" "$db_sql_file"
-  # sed -E -i "s/\bdbo_log\b/${database_name}_log/g" "$db_sql_file"
+  # Конвертираме CRLF → LF (SQL файловете са генерирани на Windows)
+  sed -i 's/\r//' "$db_sql_file"
+  # Изтриваме CREATE DATABASE блока — съдържа Windows пътища и LEDGER клауза (SQL Server 2022 only)
+  sed -i '/^CREATE DATABASE /,/^GO$/{/^GO$/!d}' "$db_sql_file"
+  # Изтриваме ALTER DATABASE блоковете — COMPATIBILITY_LEVEL = 160 е само за SQL Server 2022
+  sed -i '/^ALTER DATABASE /,/^GO$/{/^GO$/!d}' "$db_sql_file"
+  # Изтриваме USE statements — базата се задава с -d флага на sqlcmd
+  sed -i '/^USE \[/Id' "$db_sql_file"
   /opt/mssql-tools/bin/sqlcmd -S localhost -U sa -P "$database_password" -C -d "$database_name" -i "$db_sql_file"
   /opt/mssql-tools/bin/sqlcmd -S localhost -U sa -P "$database_password" -C -d "$database_name" -Q "UPDATE [Store] SET [Url] = 'https://$domain_name/' WHERE [Id] = 1;"
   /opt/mssql-tools/bin/sqlcmd -S localhost -U sa -P "$database_password" -C -d "$database_name" -Q "UPDATE [Customer] SET [Username] = '$nopCommerceEmail' WHERE [Id] = 1;"
