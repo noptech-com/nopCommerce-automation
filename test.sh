@@ -649,7 +649,12 @@ elif [ "$db_type" = "mysql" ]; then
   sudo mysql -e "UPDATE customerpassword SET Password = '$nopCommercePassword' WHERE Id = 1;" "$database_name"
   sudo mysql -e "UPDATE customerpassword SET PasswordSalt = '$nopCommercePasswordSalt' WHERE Id = 1;" "$database_name"
 elif [ "$db_type" = "mssql" ]; then
-  # Конвертираме CRLF → LF (SQL файловете са генерирани на Windows)
+  # SSMS генерира SQL файлове в UTF-16 LE — конвертираме към UTF-8 преди да пипаме с sed
+  if file "$db_sql_file" | grep -qi "utf-16\|unicode\|ucs-2"; then
+    echo -e "${YELLOW}  [MSSQL] Конвертиране на SQL файл от UTF-16 към UTF-8...${NC}"
+    iconv -f utf-16 -t utf-8 "$db_sql_file" > "${db_sql_file}.tmp" && mv "${db_sql_file}.tmp" "$db_sql_file"
+  fi
+  # Конвертираме CRLF → LF
   sed -i 's/\r//' "$db_sql_file"
   # Изтриваме CREATE DATABASE блока — съдържа Windows пътища и LEDGER клауза (SQL Server 2022 only)
   sed -i '/^CREATE DATABASE /,/^GO$/{/^GO$/!d}' "$db_sql_file"
