@@ -129,37 +129,55 @@ echo -e "${YELLOW}[2/8] Инсталиране на .NET runtime ($dotnet_runtim
 # Removing potentially unnecessery repositories
 sudo add-apt-repository --remove ppa:dotnet/backports -y
 
+# Помощна функция — изчаква всички apt/dpkg локове да се освободят
+wait_apt_locks() {
+  while sudo fuser /var/lib/dpkg/lock >/dev/null 2>&1 || \
+        sudo fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 || \
+        sudo fuser /var/lib/apt/lists/lock >/dev/null 2>&1; do
+    sleep 1
+  done
+}
+
 wget https://packages.microsoft.com/config/ubuntu/$RELEASE_VERSION/packages-microsoft-prod.deb -O packages-microsoft-prod.deb
-while sudo fuser /var/lib/dpkg/lock >/dev/null 2>&1; do sleep 1; done
+wait_apt_locks
 sudo dpkg -i packages-microsoft-prod.deb
 export DEBIAN_FRONTEND=noninteractive
-while sudo fuser /var/lib/dpkg/lock >/dev/null 2>&1; do sleep 1; done
+wait_apt_locks
 sudo apt-get update || true
-while sudo fuser /var/lib/dpkg/lock >/dev/null 2>&1; do sleep 1; done
+wait_apt_locks
 sudo DEBIAN_FRONTEND=noninteractive apt-get install -y apt-transport-https
 
-# Ofc. repo may not contain dotnet runtime, in that case install from the Ubuntu .NET backports package repository
+# Ако Microsoft repo не съдържа пакета — опитваме fallback
 if ! sudo DEBIAN_FRONTEND=noninteractive apt-get install -y "$dotnet_runtime_pkg"; then
-  sudo dpkg -r packages-microsoft-prod
-  while sudo fuser /var/lib/dpkg/lock >/dev/null 2>&1 || \
-      sudo fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1; do
-    sleep 1
-  done
-  sudo add-apt-repository ppa:dotnet/backports -y
-  sudo apt-get update || true
-  while sudo fuser /var/lib/dpkg/lock >/dev/null 2>&1 || \
-      sudo fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1; do
-    sleep 1
-  done
-  sudo DEBIAN_FRONTEND=noninteractive apt-get install -y "$dotnet_runtime_pkg"
-  if [ $? -ne 0 ]; then
-    echo "Could not install $dotnet_runtime_pkg | status code $?"
-    exit 1
+  sudo dpkg -r packages-microsoft-prod || true
+  wait_apt_locks
+
+  if [ "$RELEASE_VERSION" = "20.04" ]; then
+    # ppa:dotnet/backports НЕ поддържа Ubuntu 20.04 (focal) — инсталираме чрез snap
+    echo -e "${YELLOW}  Ubuntu 20.04: ppa:dotnet/backports не е наличен — инсталиране чрез snap...${NC}"
+    sudo snap install dotnet-runtime-80 --classic
+    sudo snap alias dotnet-runtime-80.dotnet dotnet
+    # Проверяваме дали snap инсталацията е успешна
+    if ! dotnet --info >/dev/null 2>&1; then
+      echo "Could not install $dotnet_runtime_pkg via snap"
+      exit 1
+    fi
+  else
+    # Ubuntu 22.04 / 24.04 — използваме ppa:dotnet/backports
+    sudo add-apt-repository ppa:dotnet/backports -y
+    wait_apt_locks
+    sudo apt-get update || true
+    wait_apt_locks
+    sudo DEBIAN_FRONTEND=noninteractive apt-get install -y "$dotnet_runtime_pkg"
+    if [ $? -ne 0 ]; then
+      echo "Could not install $dotnet_runtime_pkg | status code $?"
+      exit 1
+    fi
   fi
 fi
 echo "postfix postfix/main_mailer_type select Internet Site" | sudo -s debconf-set-selections
 echo "postfix postfix/mailname string $(hostname --fqdn)" | sudo -s debconf-set-selections
-while sudo fuser /var/lib/dpkg/lock >/dev/null 2>&1; do sleep 1; done
+wait_apt_locks
 sudo DEBIAN_FRONTEND=noninteractive apt-get install -y mailutils
 IP=$(curl -4 -s ifconfig.me)
 useradd -m -r -d /home/genius -s /bin/bash genius
@@ -168,7 +186,7 @@ echo "genius ALL=(ALL) NOPASSWD:ALL" | sudo EDITOR='tee -a' visudo
 sudo DEBIAN_FRONTEND=noninteractive apt purge --auto-remove -y mailutils postfix
 sudo apt clean
 
-while sudo fuser /var/lib/dpkg/lock >/dev/null 2>&1; do sleep 1; done
+wait_apt_locks
 sudo DEBIAN_FRONTEND=noninteractive apt-get install -y libgdiplus
 
 echo -e "${YELLOW}[3/8] Инсталиране и базова конфигурация на nginx + SSL...${NC}"
@@ -386,16 +404,13 @@ elif [ "$db_type" = "mssql" ]; then
   if [ ! -x /opt/mssql-tools/bin/sqlcmd ]; then
     echo -e "${YELLOW}  [MSSQL] Инсталиране на mssql-tools (sqlcmd)...${NC}"
     curl https://packages.microsoft.com/config/ubuntu/$RELEASE_VERSION/prod.list | sudo tee /etc/apt/sources.list.d/msprod.list >/dev/null
-    while sudo fuser /var/lib/dpkg/lock >/dev/null 2>&1; do echo -e "${YELLOW}  [MSSQL] Изчакване dpkg lock...${NC}"; sleep 5; done
+    wait_apt_locks
     sudo apt-get update
-    while sudo fuser /var/lib/dpkg/lock >/dev/null 2>&1; do echo -e "${YELLOW}  [MSSQL] Изчакване dpkg lock...${NC}"; sleep 5; done
+    wait_apt_locks
     if [ "$(printf '%s\n' "24.04" "$RELEASE_VERSION" | sort -V | head -n1)" = "24.04" ]; then
       sudo curl -sSL https://packages.microsoft.com/keys/microsoft.asc | sudo gpg --barch --yes --dearmor -o /usr/share/keyrings/microsoft-prod.gpg
       sudo apt-get update
-      while sudo fuser /var/lib/dpkg/lock >/dev/null 2>&1 || \
-        sudo fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1; do
-        sleep 1
-      done
+      wait_apt_locks
       sudo ACCEPT_EULA=Y apt-get install -y mssql-tools18 unixodbc-dev
       echo 'export PATH="$PATH:/opt/mssql-tools18/bin"'  >> ~/.bashrc > /dev/null
       sudo ln -s /opt/mssql-tools18 /opt/mssql-tools
@@ -425,9 +440,9 @@ elif [ "$db_type" = "mssql" ]; then
     esac
     echo -e "${YELLOW}  [MSSQL] Инсталиране на mssql-server...${NC}"
     curl https://packages.microsoft.com/config/ubuntu/$RELEASE_VERSION/$MSSQL_SERVER_VERSION | sudo tee /etc/apt/sources.list.d/$MSSQL_SERVER_VERSION >/dev/null
-    while sudo fuser /var/lib/dpkg/lock >/dev/null 2>&1; do echo -e "${YELLOW}  [MSSQL] Изчакване освобождаване на dpkg lock...${NC}"; sleep 5; done
+    wait_apt_locks
     sudo apt-get update
-    while sudo fuser /var/lib/dpkg/lock >/dev/null 2>&1; do echo -e "${YELLOW}  [MSSQL] Изчакване освобождаване на dpkg lock...${NC}"; sleep 5; done
+    wait_apt_locks
     echo -e "${YELLOW}  [MSSQL] Сваляне и инсталиране на mssql-server (може 5–15 мин, изчакайте)...${NC}"
     sudo apt-get install -y mssql-server
     echo -e "${YELLOW}  [MSSQL] Конфигуриране на SQL Server (mssql-conf setup)...${NC}"
