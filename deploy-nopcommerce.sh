@@ -377,8 +377,8 @@ elif [ "$db_type" = "mysql" ]; then
   TEMP_PWD=$(grep "temporary password is generated for root@localhost" /var/log/mysql/error.log | tail -n 1 | sed 's/.*: //')
   export MYSQL_PWD="$TEMP_PWD"
   sudo -E mysql --connect-expired-password -u root -e "ALTER USER 'root'@'localhost' IDENTIFIED BY '$database_password';"
+  # auth_socket е вграден в Ubuntu MySQL пакета — не се налага ръчна инсталация
   sudo mysql -u root -p"$database_password" <<EOF
-INSTALL PLUGIN auth_socket SONAME 'auth_socket.so';
 ALTER USER 'root'@'localhost' IDENTIFIED WITH auth_socket;
 FLUSH PRIVILEGES;
 EOF
