@@ -404,54 +404,18 @@ elif [ "$db_type" = "mssql" ]; then
 
   UBUNTU_CODENAME=$(lsb_release -cs 2>/dev/null || grep VERSION_CODENAME /etc/os-release | cut -d= -f2)
 
-  # Определяме пътя до sqlcmd (tools18 на Ubuntu 24.04+, tools на по-стари)
-  SQLCMD_BIN=""
-  [ -x /opt/mssql-tools18/bin/sqlcmd ] && SQLCMD_BIN=/opt/mssql-tools18/bin/sqlcmd
-  [ -z "$SQLCMD_BIN" ] && [ -x /opt/mssql-tools/bin/sqlcmd ] && SQLCMD_BIN=/opt/mssql-tools/bin/sqlcmd
+  # Определяме версията на mssql-server repo спрямо Ubuntu версията
+  case "$RELEASE_VERSION" in
+    "20.04") MSSQL_SERVER_VERSION=mssql-server-2019.list ;;
+    "22.04") MSSQL_SERVER_VERSION=mssql-server-2025.list ;;
+    "24.04"|"25.10") MSSQL_SERVER_VERSION=mssql-server-2025.list ;;
+    *) MSSQL_SERVER_VERSION=mssql-server-2019.list ;;
+  esac
 
-  # Инсталираме инструментите sqlcmd (пълният път се ползва по-долу)
-  if [ ! -x /opt/mssql-tools/bin/sqlcmd ] && [ ! -x /opt/mssql-tools18/bin/sqlcmd ]; then
-    echo -e "${YELLOW}  [MSSQL] Инсталиране на mssql-tools (sqlcmd)...${NC}"
-    wait_apt_locks
-    # Ubuntu 24.04+: tools18 се инсталира от mssql-server repo (не от msprod)
-    # Ubuntu 22.04 и по-стари: tools се инсталира от msprod repo
-    if [ "$(printf '%s\n' "24.04" "$RELEASE_VERSION" | sort -V | head -n1)" = "24.04" ]; then
-      # На 24.04+ mssql-tools18 идва от същия mssql-server-2025 repo — само го инсталираме
-      sudo ACCEPT_EULA=Y apt-get install -y mssql-tools18 unixodbc-dev
-      sudo ln -sf /opt/mssql-tools18 /opt/mssql-tools
-    else
-      # На 22.04 и по-стари добавяме msprod repo за tools
-      printf 'deb [arch=amd64,arm64,armhf signed-by=/usr/share/keyrings/microsoft-prod.gpg] https://packages.microsoft.com/ubuntu/%s/prod %s main\n' \
-        "$RELEASE_VERSION" "$UBUNTU_CODENAME" | sudo tee /etc/apt/sources.list.d/msprod.list >/dev/null
-      sudo apt-get update
-      wait_apt_locks
-      sudo ACCEPT_EULA=Y apt-get install -y mssql-tools unixodbc-dev
-    fi
-  fi
-
-  # Обновяваме SQLCMD_BIN след евентуална инсталация
-  [ -x /opt/mssql-tools18/bin/sqlcmd ] && SQLCMD_BIN=/opt/mssql-tools18/bin/sqlcmd
-  [ -z "$SQLCMD_BIN" ] && [ -x /opt/mssql-tools/bin/sqlcmd ] && SQLCMD_BIN=/opt/mssql-tools/bin/sqlcmd
-
-  # Инсталираме SQL Server само ако още не е наличен
-  if ! systemctl status mssql-server >/dev/null 2>&1; then
-    case "$RELEASE_VERSION" in
-      "20.04")
-          MSSQL_SERVER_VERSION=mssql-server-2019.list
-          ;;
-      "22.04")
-          MSSQL_SERVER_VERSION=mssql-server-2025.list
-          ;;
-      "24.04" | "25.10")
-          MSSQL_SERVER_VERSION=mssql-server-2025.list
-          ;;
-      *)
-          # Дефолтный вариант для всех остальных
-          MSSQL_SERVER_VERSION=mssql-server-2019.list
-          ;;
-    esac
-    echo -e "${YELLOW}  [MSSQL] Инсталиране на mssql-server...${NC}"
-    # Изтегляме sources list и добавяме signed-by= ако липсва (Ubuntu 22.04+)
+  # ── СТЪПКА 1: Добавяме mssql-server repo (задължително преди всичко друго)
+  # На 24.04+ mssql-tools18 е в СЪЩОТО repo — затова добавяме repo-то първо
+  if [ ! -f /etc/apt/sources.list.d/$MSSQL_SERVER_VERSION ]; then
+    echo -e "${YELLOW}  [MSSQL] Добавяне на Microsoft SQL Server repo...${NC}"
     MSSQL_LIST=$(curl -sSL "https://packages.microsoft.com/config/ubuntu/$RELEASE_VERSION/$MSSQL_SERVER_VERSION")
     if echo "$MSSQL_LIST" | grep -q "signed-by"; then
       echo "$MSSQL_LIST" | sudo tee /etc/apt/sources.list.d/$MSSQL_SERVER_VERSION >/dev/null
@@ -460,10 +424,42 @@ elif [ "$db_type" = "mssql" ]; then
         sed 's|deb \[arch=|deb [signed-by=/usr/share/keyrings/microsoft-prod.gpg arch=|g; s|deb \[|deb [signed-by=/usr/share/keyrings/microsoft-prod.gpg |g' | \
         sudo tee /etc/apt/sources.list.d/$MSSQL_SERVER_VERSION >/dev/null
     fi
-    wait_apt_locks
-    sudo apt-get update
-    wait_apt_locks
+  fi
+
+  # На 22.04 и по-стари добавяме и msprod repo за mssql-tools (на 24.04+ е в mssql-server repo)
+  if [ "$(printf '%s\n' "24.04" "$RELEASE_VERSION" | sort -V | head -n1)" != "24.04" ]; then
+    if [ ! -f /etc/apt/sources.list.d/msprod.list ]; then
+      printf 'deb [arch=amd64,arm64,armhf signed-by=/usr/share/keyrings/microsoft-prod.gpg] https://packages.microsoft.com/ubuntu/%s/prod %s main\n' \
+        "$RELEASE_VERSION" "$UBUNTU_CODENAME" | sudo tee /etc/apt/sources.list.d/msprod.list >/dev/null
+    fi
+  fi
+
+  wait_apt_locks
+  sudo apt-get update
+  wait_apt_locks
+
+  # ── СТЪПКА 2: Инсталираме sqlcmd tools (repo вече е наличен)
+  SQLCMD_BIN=""
+  [ -x /opt/mssql-tools18/bin/sqlcmd ] && SQLCMD_BIN=/opt/mssql-tools18/bin/sqlcmd
+  [ -z "$SQLCMD_BIN" ] && [ -x /opt/mssql-tools/bin/sqlcmd ] && SQLCMD_BIN=/opt/mssql-tools/bin/sqlcmd
+
+  if [ -z "$SQLCMD_BIN" ]; then
+    echo -e "${YELLOW}  [MSSQL] Инсталиране на mssql-tools (sqlcmd)...${NC}"
+    if [ "$(printf '%s\n' "24.04" "$RELEASE_VERSION" | sort -V | head -n1)" = "24.04" ]; then
+      sudo ACCEPT_EULA=Y apt-get install -y mssql-tools18 unixodbc-dev
+      sudo ln -sf /opt/mssql-tools18 /opt/mssql-tools
+    else
+      sudo ACCEPT_EULA=Y apt-get install -y mssql-tools unixodbc-dev
+    fi
+    # Обновяваме SQLCMD_BIN след инсталацията
+    [ -x /opt/mssql-tools18/bin/sqlcmd ] && SQLCMD_BIN=/opt/mssql-tools18/bin/sqlcmd
+    [ -z "$SQLCMD_BIN" ] && [ -x /opt/mssql-tools/bin/sqlcmd ] && SQLCMD_BIN=/opt/mssql-tools/bin/sqlcmd
+  fi
+
+  # ── СТЪПКА 3: Инсталираме SQL Server само ако още не е наличен
+  if ! systemctl status mssql-server >/dev/null 2>&1; then
     echo -e "${YELLOW}  [MSSQL] Сваляне и инсталиране на mssql-server (може 5–15 мин, изчакайте)...${NC}"
+    wait_apt_locks
     sudo apt-get install -y mssql-server
     echo -e "${YELLOW}  [MSSQL] Конфигуриране на SQL Server (mssql-conf setup)...${NC}"
     sudo systemctl stop mssql-server 2>/dev/null || true
@@ -476,9 +472,7 @@ elif [ "$db_type" = "mssql" ]; then
     echo -e "${YELLOW}  [MSSQL] Конфигурацията приключи. Стартиране на услугата...${NC}"
     sudo systemctl enable mssql-server
 
-    # Check if DBMS is running and accepts connections (If it accepts connections, then we can stop in gracefully)
-    # We make up to 10 attempts which is more then enough for mssql-server to boot
-    # Обновяваме SQLCMD_BIN след инсталацията (може да е инсталиран tools18)
+    # Обновяваме SQLCMD_BIN след инсталация на server (tools18 може да е дошъл с него)
     [ -x /opt/mssql-tools18/bin/sqlcmd ] && SQLCMD_BIN=/opt/mssql-tools18/bin/sqlcmd
     [ -z "$SQLCMD_BIN" ] && [ -x /opt/mssql-tools/bin/sqlcmd ] && SQLCMD_BIN=/opt/mssql-tools/bin/sqlcmd
 
