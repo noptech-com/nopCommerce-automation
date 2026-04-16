@@ -397,23 +397,31 @@ elif [ "$db_type" = "mssql" ]; then
   MSSQL_SA_PASSWORD="$database_password"
   MSSQL_PID="Express"
 
-  curl https://packages.microsoft.com/keys/microsoft.asc | sudo tee /etc/apt/trusted.gpg.d/microsoft.asc >/dev/null
-  sudo curl -sSL https://packages.microsoft.com/keys/microsoft.asc | sudo gpg --barch --yes --dearmor -o /usr/share/keyrings/microsoft-prod.gpg
+  # Импортиране на Microsoft GPG ключ (dearmored — изискване на Ubuntu 22.04+)
+  curl -sSL https://packages.microsoft.com/keys/microsoft.asc | \
+    sudo gpg --batch --yes --dearmor -o /usr/share/keyrings/microsoft-prod.gpg
+  sudo chmod a+r /usr/share/keyrings/microsoft-prod.gpg
+
+  UBUNTU_CODENAME=$(lsb_release -cs 2>/dev/null || grep VERSION_CODENAME /etc/os-release | cut -d= -f2)
+
+  # Определяме пътя до sqlcmd (tools18 на Ubuntu 24.04+, tools на по-стари)
+  SQLCMD_BIN=""
+  [ -x /opt/mssql-tools18/bin/sqlcmd ] && SQLCMD_BIN=/opt/mssql-tools18/bin/sqlcmd
+  [ -z "$SQLCMD_BIN" ] && [ -x /opt/mssql-tools/bin/sqlcmd ] && SQLCMD_BIN=/opt/mssql-tools/bin/sqlcmd
 
   # Инсталираме инструментите sqlcmd (пълният път се ползва по-долу)
-  if [ ! -x /opt/mssql-tools/bin/sqlcmd ]; then
+  if [ ! -x /opt/mssql-tools/bin/sqlcmd ] && [ ! -x /opt/mssql-tools18/bin/sqlcmd ]; then
     echo -e "${YELLOW}  [MSSQL] Инсталиране на mssql-tools (sqlcmd)...${NC}"
-    curl https://packages.microsoft.com/config/ubuntu/$RELEASE_VERSION/prod.list | sudo tee /etc/apt/sources.list.d/msprod.list >/dev/null
+    # Sources list със signed-by (задължително за Ubuntu 22.04+)
+    printf 'deb [arch=amd64,arm64,armhf signed-by=/usr/share/keyrings/microsoft-prod.gpg] https://packages.microsoft.com/ubuntu/%s/prod %s main\n' \
+      "$RELEASE_VERSION" "$UBUNTU_CODENAME" | sudo tee /etc/apt/sources.list.d/msprod.list >/dev/null
     wait_apt_locks
     sudo apt-get update
     wait_apt_locks
     if [ "$(printf '%s\n' "24.04" "$RELEASE_VERSION" | sort -V | head -n1)" = "24.04" ]; then
-      sudo curl -sSL https://packages.microsoft.com/keys/microsoft.asc | sudo gpg --barch --yes --dearmor -o /usr/share/keyrings/microsoft-prod.gpg
-      sudo apt-get update
-      wait_apt_locks
       sudo ACCEPT_EULA=Y apt-get install -y mssql-tools18 unixodbc-dev
-      echo 'export PATH="$PATH:/opt/mssql-tools18/bin"'  >> ~/.bashrc > /dev/null
-      sudo ln -s /opt/mssql-tools18 /opt/mssql-tools
+      echo 'export PATH="$PATH:/opt/mssql-tools18/bin"' >> ~/.bashrc
+      sudo ln -sf /opt/mssql-tools18 /opt/mssql-tools
       source ~/.bashrc
     else
       sudo ACCEPT_EULA=Y apt-get install -y mssql-tools unixodbc-dev
@@ -439,7 +447,15 @@ elif [ "$db_type" = "mssql" ]; then
           ;;
     esac
     echo -e "${YELLOW}  [MSSQL] Инсталиране на mssql-server...${NC}"
-    curl https://packages.microsoft.com/config/ubuntu/$RELEASE_VERSION/$MSSQL_SERVER_VERSION | sudo tee /etc/apt/sources.list.d/$MSSQL_SERVER_VERSION >/dev/null
+    # Изтегляме sources list и добавяме signed-by= ако липсва (Ubuntu 22.04+)
+    MSSQL_LIST=$(curl -sSL "https://packages.microsoft.com/config/ubuntu/$RELEASE_VERSION/$MSSQL_SERVER_VERSION")
+    if echo "$MSSQL_LIST" | grep -q "signed-by"; then
+      echo "$MSSQL_LIST" | sudo tee /etc/apt/sources.list.d/$MSSQL_SERVER_VERSION >/dev/null
+    else
+      echo "$MSSQL_LIST" | \
+        sed 's|deb \[arch=|deb [signed-by=/usr/share/keyrings/microsoft-prod.gpg arch=|g; s|deb \[|deb [signed-by=/usr/share/keyrings/microsoft-prod.gpg |g' | \
+        sudo tee /etc/apt/sources.list.d/$MSSQL_SERVER_VERSION >/dev/null
+    fi
     wait_apt_locks
     sudo apt-get update
     wait_apt_locks
@@ -458,8 +474,12 @@ elif [ "$db_type" = "mssql" ]; then
 
     # Check if DBMS is running and accepts connections (If it accepts connections, then we can stop in gracefully)
     # We make up to 10 attempts which is more then enough for mssql-server to boot
+    # Обновяваме SQLCMD_BIN след инсталацията (може да е инсталиран tools18)
+    [ -x /opt/mssql-tools18/bin/sqlcmd ] && SQLCMD_BIN=/opt/mssql-tools18/bin/sqlcmd
+    [ -z "$SQLCMD_BIN" ] && [ -x /opt/mssql-tools/bin/sqlcmd ] && SQLCMD_BIN=/opt/mssql-tools/bin/sqlcmd
+
     for i in {1..10}; do
-        /opt/mssql-tools/bin/sqlcmd -S localhost -U sa -P "$MSSQL_SA_PASSWORD" -C -Q "SELECT 1" > /dev/null 2>&1
+        $SQLCMD_BIN -S localhost -U sa -P "$MSSQL_SA_PASSWORD" -C -Q "SELECT 1" > /dev/null 2>&1
         if [ $? -eq 0 ]; then
             echo "SQL Server is UP and Ready!"
             break
@@ -479,7 +499,7 @@ elif [ "$db_type" = "mssql" ]; then
   while [ $COUNTER -le 24 ] && [ $ERRSTATUS -ne 0 ]; do
     echo -e "${YELLOW}  [MSSQL] Опит $COUNTER/24...${NC}"
     sleep 5
-    /opt/mssql-tools/bin/sqlcmd -S localhost -U sa -P "$MSSQL_SA_PASSWORD" -C -Q "SELECT 1" >/dev/null 2>&1
+    $SQLCMD_BIN -S localhost -U sa -P "$MSSQL_SA_PASSWORD" -C -Q "SELECT 1" >/dev/null 2>&1
     ERRSTATUS=$?
     COUNTER=$((COUNTER+1))
   done
@@ -492,9 +512,9 @@ elif [ "$db_type" = "mssql" ]; then
 
   # Създаваме login, база и db_owner потребител за nopCommerce
   echo -e "${YELLOW}  [MSSQL] Създаване на login, база и db_owner потребител...${NC}"
-  /opt/mssql-tools/bin/sqlcmd -S localhost -U sa -P "$MSSQL_SA_PASSWORD" -C -Q "IF NOT EXISTS (SELECT * FROM sys.server_principals WHERE name = N'$database_user') CREATE LOGIN [$database_user] WITH PASSWORD = N'$database_password';"
-  /opt/mssql-tools/bin/sqlcmd -S localhost -U sa -P "$MSSQL_SA_PASSWORD" -C -Q "IF DB_ID(N'$database_name') IS NULL CREATE DATABASE [$database_name];"
-  /opt/mssql-tools/bin/sqlcmd -S localhost -U sa -P "$MSSQL_SA_PASSWORD" -C -d "$database_name" -Q "IF NOT EXISTS (SELECT * FROM sys.database_principals WHERE name = N'$database_user') CREATE USER [$database_user] FOR LOGIN [$database_user]; ALTER ROLE [db_owner] ADD MEMBER [$database_user];"
+  $SQLCMD_BIN -S localhost -U sa -P "$MSSQL_SA_PASSWORD" -C -Q "IF NOT EXISTS (SELECT * FROM sys.server_principals WHERE name = N'$database_user') CREATE LOGIN [$database_user] WITH PASSWORD = N'$database_password';"
+  $SQLCMD_BIN -S localhost -U sa -P "$MSSQL_SA_PASSWORD" -C -Q "IF DB_ID(N'$database_name') IS NULL CREATE DATABASE [$database_name];"
+  $SQLCMD_BIN -S localhost -U sa -P "$MSSQL_SA_PASSWORD" -C -d "$database_name" -Q "IF NOT EXISTS (SELECT * FROM sys.database_principals WHERE name = N'$database_user') CREATE USER [$database_user] FOR LOGIN [$database_user]; ALTER ROLE [db_owner] ADD MEMBER [$database_user];"
 fi
 
 echo -e "${YELLOW}[6/8] Сваляне и разархивиране на nopCommerce...${NC}"
@@ -674,12 +694,12 @@ elif [ "$db_type" = "mssql" ]; then
   # Изтриваме целия header (CREATE DATABASE, ALTER DATABASE, USE, sp_db_vardecimal_storage_format и т.н.)
   # и стартираме от Object-коментара на първата таблица — пропускаме "Object: Database" блока
   awk 'found || /Object:.*[Tt]able/{found=1; print}' "$db_sql_file" > "${db_sql_file}.tmp" && mv "${db_sql_file}.tmp" "$db_sql_file"
-  /opt/mssql-tools/bin/sqlcmd -S localhost -U sa -P "$database_password" -C -d "$database_name" -i "$db_sql_file"
-  /opt/mssql-tools/bin/sqlcmd -S localhost -U sa -P "$database_password" -C -d "$database_name" -Q "UPDATE [Store] SET [Url] = 'https://$domain_name/' WHERE [Id] = 1;"
-  /opt/mssql-tools/bin/sqlcmd -S localhost -U sa -P "$database_password" -C -d "$database_name" -Q "UPDATE [Customer] SET [Username] = '$nopCommerceEmail' WHERE [Id] = 1;"
-  /opt/mssql-tools/bin/sqlcmd -S localhost -U sa -P "$database_password" -C -d "$database_name" -Q "UPDATE [Customer] SET [Email] = '$nopCommerceEmail' WHERE [Id] = 1;"
-  /opt/mssql-tools/bin/sqlcmd -S localhost -U sa -P "$database_password" -C -d "$database_name" -Q "UPDATE [CustomerPassword] SET [Password] = '$nopCommercePassword' WHERE [Id] = 1;"
-  /opt/mssql-tools/bin/sqlcmd -S localhost -U sa -P "$database_password" -C -d "$database_name" -Q "UPDATE [CustomerPassword] SET [PasswordSalt] = '$nopCommercePasswordSalt' WHERE [Id] = 1;"
+  $SQLCMD_BIN -S localhost -U sa -P "$database_password" -C -d "$database_name" -i "$db_sql_file"
+  $SQLCMD_BIN -S localhost -U sa -P "$database_password" -C -d "$database_name" -Q "UPDATE [Store] SET [Url] = 'https://$domain_name/' WHERE [Id] = 1;"
+  $SQLCMD_BIN -S localhost -U sa -P "$database_password" -C -d "$database_name" -Q "UPDATE [Customer] SET [Username] = '$nopCommerceEmail' WHERE [Id] = 1;"
+  $SQLCMD_BIN -S localhost -U sa -P "$database_password" -C -d "$database_name" -Q "UPDATE [Customer] SET [Email] = '$nopCommerceEmail' WHERE [Id] = 1;"
+  $SQLCMD_BIN -S localhost -U sa -P "$database_password" -C -d "$database_name" -Q "UPDATE [CustomerPassword] SET [Password] = '$nopCommercePassword' WHERE [Id] = 1;"
+  $SQLCMD_BIN -S localhost -U sa -P "$database_password" -C -d "$database_name" -Q "UPDATE [CustomerPassword] SET [PasswordSalt] = '$nopCommercePasswordSalt' WHERE [Id] = 1;"
 fi
 
 rm "$db_sql_file"
