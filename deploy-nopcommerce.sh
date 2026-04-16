@@ -412,22 +412,26 @@ elif [ "$db_type" = "mssql" ]; then
   # Инсталираме инструментите sqlcmd (пълният път се ползва по-долу)
   if [ ! -x /opt/mssql-tools/bin/sqlcmd ] && [ ! -x /opt/mssql-tools18/bin/sqlcmd ]; then
     echo -e "${YELLOW}  [MSSQL] Инсталиране на mssql-tools (sqlcmd)...${NC}"
-    # Sources list със signed-by (задължително за Ubuntu 22.04+)
-    printf 'deb [arch=amd64,arm64,armhf signed-by=/usr/share/keyrings/microsoft-prod.gpg] https://packages.microsoft.com/ubuntu/%s/prod %s main\n' \
-      "$RELEASE_VERSION" "$UBUNTU_CODENAME" | sudo tee /etc/apt/sources.list.d/msprod.list >/dev/null
     wait_apt_locks
-    sudo apt-get update
-    wait_apt_locks
+    # Ubuntu 24.04+: tools18 се инсталира от mssql-server repo (не от msprod)
+    # Ubuntu 22.04 и по-стари: tools се инсталира от msprod repo
     if [ "$(printf '%s\n' "24.04" "$RELEASE_VERSION" | sort -V | head -n1)" = "24.04" ]; then
+      # На 24.04+ mssql-tools18 идва от същия mssql-server-2025 repo — само го инсталираме
       sudo ACCEPT_EULA=Y apt-get install -y mssql-tools18 unixodbc-dev
-      echo 'export PATH="$PATH:/opt/mssql-tools18/bin"' >> ~/.bashrc
       sudo ln -sf /opt/mssql-tools18 /opt/mssql-tools
-      source ~/.bashrc
     else
+      # На 22.04 и по-стари добавяме msprod repo за tools
+      printf 'deb [arch=amd64,arm64,armhf signed-by=/usr/share/keyrings/microsoft-prod.gpg] https://packages.microsoft.com/ubuntu/%s/prod %s main\n' \
+        "$RELEASE_VERSION" "$UBUNTU_CODENAME" | sudo tee /etc/apt/sources.list.d/msprod.list >/dev/null
+      sudo apt-get update
+      wait_apt_locks
       sudo ACCEPT_EULA=Y apt-get install -y mssql-tools unixodbc-dev
-      echo 'export PATH="$PATH:/opt/mssql-tools/bin"' | sudo tee /etc/profile.d/mssql-tools.sh >/dev/null
     fi
   fi
+
+  # Обновяваме SQLCMD_BIN след евентуална инсталация
+  [ -x /opt/mssql-tools18/bin/sqlcmd ] && SQLCMD_BIN=/opt/mssql-tools18/bin/sqlcmd
+  [ -z "$SQLCMD_BIN" ] && [ -x /opt/mssql-tools/bin/sqlcmd ] && SQLCMD_BIN=/opt/mssql-tools/bin/sqlcmd
 
   # Инсталираме SQL Server само ако още не е наличен
   if ! systemctl status mssql-server >/dev/null 2>&1; then
