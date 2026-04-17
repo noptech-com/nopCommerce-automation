@@ -404,10 +404,14 @@ elif [ "$db_type" = "mssql" ]; then
 
   UBUNTU_CODENAME=$(lsb_release -cs 2>/dev/null || grep VERSION_CODENAME /etc/os-release | cut -d= -f2)
 
-  # ── СТЪПКА 2: mssql-server repo
+  # ── СТЪПКА 2: mssql-server repo (URL зависи от Ubuntu версията)
   if [ ! -f /etc/apt/sources.list.d/mssql-server-2025.list ]; then
-    echo -e "${YELLOW}  [MSSQL] Добавяне на mssql-server repo...${NC}"
-    MSSQL_LIST=$(curl -sSL "https://packages.microsoft.com/config/ubuntu/22.04/mssql-server-2025.list")
+    echo -e "${YELLOW}  [MSSQL] Добавяне на mssql-server repo за Ubuntu ${RELEASE_VERSION}...${NC}"
+    MSSQL_LIST=$(curl -sSL "https://packages.microsoft.com/config/ubuntu/${RELEASE_VERSION}/mssql-server-2025.list")
+    if [ -z "$MSSQL_LIST" ]; then
+      echo -e "${RED}  [MSSQL] Не може да се свали mssql-server-2025.list за Ubuntu ${RELEASE_VERSION}${NC}"
+      exit 1
+    fi
     if echo "$MSSQL_LIST" | grep -q "signed-by"; then
       echo "$MSSQL_LIST" | sudo tee /etc/apt/sources.list.d/mssql-server-2025.list >/dev/null
     else
@@ -417,21 +421,35 @@ elif [ "$db_type" = "mssql" ]; then
     fi
   fi
 
-  # ── СТЪПКА 3: msprod repo за mssql-tools (sqlcmd)
+  # ── СТЪПКА 3: msprod repo за mssql-tools (URL зависи от Ubuntu версията)
   if [ ! -f /etc/apt/sources.list.d/msprod.list ]; then
-    printf 'deb [arch=amd64,arm64,armhf signed-by=/usr/share/keyrings/microsoft-prod.gpg] https://packages.microsoft.com/ubuntu/22.04/prod %s main\n' \
-      "$UBUNTU_CODENAME" | sudo tee /etc/apt/sources.list.d/msprod.list >/dev/null
+    printf 'deb [arch=amd64,arm64,armhf signed-by=/usr/share/keyrings/microsoft-prod.gpg] https://packages.microsoft.com/ubuntu/%s/prod %s main\n' \
+      "$RELEASE_VERSION" "$UBUNTU_CODENAME" | sudo tee /etc/apt/sources.list.d/msprod.list >/dev/null
   fi
 
   wait_apt_locks
   sudo apt-get update
   wait_apt_locks
 
-  # ── СТЪПКА 4: Инсталираме mssql-tools (sqlcmd) ако липсват
-  SQLCMD_BIN=/opt/mssql-tools/bin/sqlcmd
+  # ── СТЪПКА 4: mssql-tools / mssql-tools18 (зависи от Ubuntu версията)
+  #   22.04 → mssql-tools  → /opt/mssql-tools/bin/sqlcmd
+  #   24.04 → mssql-tools18 → /opt/mssql-tools18/bin/sqlcmd
+  if [ "$RELEASE_VERSION" = "22.04" ]; then
+    SQLCMD_BIN=/opt/mssql-tools/bin/sqlcmd
+    MSSQL_TOOLS_PKG="mssql-tools"
+  else
+    SQLCMD_BIN=/opt/mssql-tools18/bin/sqlcmd
+    MSSQL_TOOLS_PKG="mssql-tools18"
+  fi
+
   if [ ! -x "$SQLCMD_BIN" ]; then
-    echo -e "${YELLOW}  [MSSQL] Инсталиране на mssql-tools (sqlcmd)...${NC}"
-    sudo ACCEPT_EULA=Y apt-get install -y mssql-tools unixodbc-dev
+    echo -e "${YELLOW}  [MSSQL] Инсталиране на ${MSSQL_TOOLS_PKG} (sqlcmd)...${NC}"
+    sudo ACCEPT_EULA=Y apt-get install -y "$MSSQL_TOOLS_PKG" unixodbc-dev
+  fi
+
+  # ── СТЪПКА 4б: liblber-2.5.so.0 е нужна за mssql-server на Ubuntu 24.04
+  if [ "$RELEASE_VERSION" = "24.04" ]; then
+    sudo DEBIAN_FRONTEND=noninteractive apt-get install -y libldap-2.5-0 || true
   fi
 
   # ── СТЪПКА 5: Инсталираме mssql-server ако не е наличен
