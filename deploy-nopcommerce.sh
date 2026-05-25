@@ -40,10 +40,8 @@ domain_name=$3
 nop_version=$4
 db_type=$5
 RELEASE_VERSION=$(grep VERSION_ID /etc/os-release | cut -d '"' -f2)
-# Името на базата = първата част от домейна (преди точката), напр. zetys8ic4tLE за zetys8ic4tLE.nop-tech.com
 database_name=$(echo "$domain_name" | cut -d. -f1)
 
-# www се използва само за root домейни (example.com), не за subdomains (abc.example.com)
 dot_count=$(echo "$domain_name" | tr -cd '.' | wc -c)
 if [ "$dot_count" -ge 2 ]; then
     has_www=false
@@ -55,7 +53,6 @@ nopCommerceEmail=$6
 nopCommercePassword=$7
 nopCommercePasswordSalt=$8
 
-# Опционален ограничен потребител за достъп само до файловете на nopCommerce
 limited_user=$9
 limited_user_password=${10}
 
@@ -67,7 +64,6 @@ echo "  Email: $nopCommerceEmail"
 echo "  nopCommerce version: $nop_version"
 echo "  DB type: $db_type"
 
-# Определяне на правилната .NET версия и nopCommerce пакет според nop_version
 case "$nop_version" in
   "4.6")
     dotnet_runtime_pkg="aspnetcore-runtime-7.0"
@@ -99,7 +95,6 @@ case "$nop_version" in
     ;;
 esac
 
-# Тип база данни: postgres / mssql / mysql
 case "$db_type" in
   "postgres")
     data_provider="postgresql"
@@ -126,10 +121,8 @@ db_sql_url="https://raw.githubusercontent.com/noptech-com/nopCommerce-automation
 
 echo -e "${YELLOW}[2/8] Инсталиране на .NET runtime ($dotnet_runtime_pkg) и зависимости...${NC}"
 
-# Removing potentially unnecessery repositories
 sudo add-apt-repository --remove ppa:dotnet/backports -y
 
-# Помощна функция — изчаква всички apt/dpkg локове да се освободят
 wait_apt_locks() {
   while sudo fuser /var/lib/dpkg/lock >/dev/null 2>&1 || \
         sudo fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 || \
@@ -147,23 +140,19 @@ sudo apt-get update || true
 wait_apt_locks
 sudo DEBIAN_FRONTEND=noninteractive apt-get install -y apt-transport-https
 
-# Ако Microsoft repo не съдържа пакета — опитваме fallback
 if ! sudo DEBIAN_FRONTEND=noninteractive apt-get install -y "$dotnet_runtime_pkg"; then
   sudo dpkg -r packages-microsoft-prod || true
   wait_apt_locks
 
   if [ "$RELEASE_VERSION" = "20.04" ]; then
-    # ppa:dotnet/backports НЕ поддържа Ubuntu 20.04 (focal) — инсталираме чрез snap
     echo -e "${YELLOW}  Ubuntu 20.04: ppa:dotnet/backports не е наличен — инсталиране чрез snap...${NC}"
     sudo snap install dotnet-runtime-80 --classic
     sudo snap alias dotnet-runtime-80.dotnet dotnet
-    # Проверяваме дали snap инсталацията е успешна
     if ! dotnet --info >/dev/null 2>&1; then
       echo "Could not install $dotnet_runtime_pkg via snap"
       exit 1
     fi
   else
-    # Ubuntu 22.04 / 24.04 — използваме ppa:dotnet/backports
     sudo add-apt-repository ppa:dotnet/backports -y
     wait_apt_locks
     sudo apt-get update || true
@@ -196,7 +185,6 @@ nopcommerce_directory="/var/www/$domain_name"
 sudo apt update || true
 sudo apt install -y nginx
 
-# Начална nginx конфигурация (само port 80) - нужна за certbot challenge
 sudo tee /etc/nginx/sites-available/$domain_name <<EOF
 server {
     listen 80;
@@ -220,10 +208,8 @@ sudo systemctl restart nginx
 mkdir $nopcommerce_directory
 sudo apt install -y certbot python3-certbot-nginx
 
-# SSL е задължителен - certbot трябва да успее
 echo -e "${YELLOW}Получаване на SSL сертификат за $domain_name и www.$domain_name...${NC}"
 
-# Използваме certonly (не пипа nginx конфигурацията, ние я настройваме ръчно по-долу)
 if ! sudo certbot certonly --nginx -d $domain_name -d www.$domain_name --agree-tos --no-eff-email -m office@nop-tech.com --non-interactive; then
     echo -e "${RED}ГРЕШКА: Certbot не успя да получи SSL сертификат!${NC}"
     echo -e "${YELLOW}Проверете: DNS A запис за $domain_name -> $IP и порт 80 е отворен${NC}"
@@ -239,7 +225,6 @@ USE_SSL=true
 
 NGINX_CONFIG="/etc/nginx/sites-available/$domain_name"
 
-# Пълна nginx конфигурация с SSL
 sudo tee "$NGINX_CONFIG" <<EOF
 # HTTPS server for main domain
 server {
@@ -295,7 +280,6 @@ server {
 }
 EOF
 
-# IP redirect - само ако IP е получен (избягва server_name празен)
 if [ -n "$IP" ] && [ "$IP" != "localhost" ]; then
     sudo tee -a "$NGINX_CONFIG" <<EOF
 
@@ -323,7 +307,6 @@ fi
 echo -e "${YELLOW}[4/8] Тестване и рестарт на nginx...${NC}"
 
 if ! sudo nginx -t 2>/dev/null; then
-    # Fallback за по-стари nginx: http2 on не се поддържа, използваме listen 443 ssl http2
     if grep -q "http2 on" "$NGINX_CONFIG" 2>/dev/null; then
         echo -e "${YELLOW}Опит с listen 443 ssl http2 за по-стари nginx...${NC}"
         sudo sed -i 's/listen 443 ssl;/listen 443 ssl http2;/' "$NGINX_CONFIG"
@@ -340,12 +323,21 @@ else
     sudo systemctl restart nginx
 fi
 
+# ============================================================
+# [5/8] БАЗА ДАННИ — създаване + импорт на SQL (ПРЕДИ nopCommerce)
+# ============================================================
+# ВАЖНО: SQL файлът се сваля и импортира тук, докато базата е
+# напълно празна. Ако импортът стане след стартиране на
+# nopCommerce, ASP.NET Core автоматично засича промяната в
+# appsettings.json (reloadOnChange: true), свързва се с базата
+# и създава схемата — при което SQL импортът вдига стотици
+# "relation already exists" грешки.
+# ============================================================
 echo -e "${YELLOW}[5/8] Инсталация и подготовка на база данни ($db_type)...${NC}"
 
 if [ "$db_type" = "postgres" ]; then
   sudo apt install -y postgresql postgresql-contrib
 
-  # PostgreSQL: идентификатори с точки/тирета трябва да са в кавички
   DB_QUOTED="\"$database_name\""
   USER_QUOTED="\"$database_user\""
 
@@ -354,57 +346,71 @@ if [ "$db_type" = "postgres" ]; then
   sudo -u postgres psql -c "GRANT ALL PRIVILEGES ON DATABASE $DB_QUOTED TO $USER_QUOTED;"
   sudo -u postgres psql -c "CREATE EXTENSION IF NOT EXISTS citext; CREATE EXTENSION IF NOT EXISTS pgcrypto;" -d "$database_name"
   sudo -u postgres psql -c "ALTER USER $USER_QUOTED WITH SUPERUSER;"
+
+  # --- Импорт на SQL в ПРАЗНАТА база (преди nopCommerce да стартира) ---
+  echo -e "${YELLOW}[DB] Сваляне на $db_sql_file...${NC}"
+  wget "$db_sql_url" -O "$db_sql_file"
+  echo -e "${YELLOW}[DB] Импорт на default данни в нова база (PostgreSQL)...${NC}"
+  sudo -u postgres PGPASSWORD=$database_password psql -U "$database_user" -d "$database_name" -h localhost -f "$db_sql_file"
+  echo -e "${YELLOW}[DB] Настройка на Store URL и admin акаунт...${NC}"
+  sudo -u postgres PGPASSWORD=$database_password psql -U "$database_user" -d "$database_name" -h localhost -c "UPDATE \"Store\" SET \"Url\" = 'https://$domain_name/' WHERE \"Id\" = 1;"
+  sudo -u postgres PGPASSWORD=$database_password psql -U "$database_user" -d "$database_name" -h localhost -c "UPDATE \"Customer\" SET \"Username\" = '$nopCommerceEmail' WHERE \"Id\" = 1;"
+  sudo -u postgres PGPASSWORD=$database_password psql -U "$database_user" -d "$database_name" -h localhost -c "UPDATE \"Customer\" SET \"Email\" = '$nopCommerceEmail' WHERE \"Id\" = 1;"
+  sudo -u postgres PGPASSWORD=$database_password psql -U "$database_user" -d "$database_name" -h localhost -c "UPDATE \"CustomerPassword\" SET \"Password\" = '$nopCommercePassword' WHERE \"Id\" = 1;"
+  sudo -u postgres PGPASSWORD=$database_password psql -U "$database_user" -d "$database_name" -h localhost -c "UPDATE \"CustomerPassword\" SET \"PasswordSalt\" = '$nopCommercePasswordSalt' WHERE \"Id\" = 1;"
+  rm -f "$db_sql_file"
+
 elif [ "$db_type" = "mysql" ]; then
   sudo DEBIAN_FRONTEND=noninteractive apt-get install -y mysql-server
 
-  # Switch to lower case mode: Need to reinitialize MySQL
-
-  # 1. Recreate datadir
   sudo systemctl stop mysql
   sudo rm -rf /var/lib/mysql && sudo mkdir /var/lib/mysql
   sudo chown mysql:mysql /var/lib/mysql
   sudo chmod 750 /var/lib/mysql
-
-  # 2. Edit config to lower case
-  sudo bash -c "echo 'lower_case_table_names=1' >>  /etc/mysql/mysql.conf.d/mysqld.cnf"
-
-  # 3. Reinitialize
+  sudo bash -c "echo 'lower_case_table_names=1' >> /etc/mysql/mysql.conf.d/mysqld.cnf"
   sudo mysqld --defaults-file=/etc/mysql/my.cnf --initialize --user=mysql --lower-case-table-names=1
   sudo systemctl enable mysql
   sudo systemctl start mysql
-  
-  # 4. Configure authentication
+
   TEMP_PWD=$(grep "temporary password is generated for root@localhost" /var/log/mysql/error.log | tail -n 1 | sed 's/.*: //')
   export MYSQL_PWD="$TEMP_PWD"
   sudo -E mysql --connect-expired-password -u root -e "ALTER USER 'root'@'localhost' IDENTIFIED BY '$database_password';"
-  # auth_socket е вграден в Ubuntu MySQL пакета — не се налага ръчна инсталация
   sudo mysql -u root -p"$database_password" <<EOF
 ALTER USER 'root'@'localhost' IDENTIFIED WITH auth_socket;
 FLUSH PRIVILEGES;
 EOF
-
   unset MYSQL_PWD
 
-
-  # Създаваме база и потребител за MySQL
   sudo mysql -e "CREATE DATABASE IF NOT EXISTS \`$database_name\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
   sudo mysql -e "CREATE USER IF NOT EXISTS '$database_user'@'localhost' IDENTIFIED BY '$database_password';"
   sudo mysql -e "GRANT ALL PRIVILEGES ON \`$database_name\`.* TO '$database_user'@'localhost';"
   sudo mysql -e "FLUSH PRIVILEGES;"
+
+  # --- Импорт на SQL в ПРАЗНАТА база (преди nopCommerce да стартира) ---
+  echo -e "${YELLOW}[DB] Сваляне на $db_sql_file...${NC}"
+  wget "$db_sql_url" -O "$db_sql_file"
+  echo -e "${YELLOW}[DB] Импорт на default данни в нова база (MySQL)...${NC}"
+  sudo mysql "$database_name" < "$db_sql_file"
+  echo -e "${YELLOW}[DB] Настройка на Store URL и admin акаунт...${NC}"
+  sudo mysql -e "UPDATE store SET Url = 'https://$domain_name/' WHERE Id = 1;" "$database_name"
+  sudo mysql -e "UPDATE customer SET Username = '$nopCommerceEmail' WHERE Id = 1;" "$database_name"
+  sudo mysql -e "UPDATE customer SET Email = '$nopCommerceEmail' WHERE Id = 1;" "$database_name"
+  sudo mysql -e "UPDATE customerpassword SET Password = '$nopCommercePassword' WHERE Id = 1;" "$database_name"
+  sudo mysql -e "UPDATE customerpassword SET PasswordSalt = '$nopCommercePasswordSalt' WHERE Id = 1;" "$database_name"
+  rm -f "$db_sql_file"
+
 elif [ "$db_type" = "mssql" ]; then
   echo -e "${YELLOW}  [MSSQL] Инсталиране и настройка на SQL Server (Express) за MSSQL база...${NC}"
 
   MSSQL_SA_PASSWORD="$database_password"
   MSSQL_PID="Express"
 
-  # ── СТЪПКА 1: Microsoft GPG ключ
   curl -sSL https://packages.microsoft.com/keys/microsoft.asc | \
     sudo gpg --batch --yes --dearmor -o /usr/share/keyrings/microsoft-prod.gpg
   sudo chmod a+r /usr/share/keyrings/microsoft-prod.gpg
 
   UBUNTU_CODENAME=$(lsb_release -cs 2>/dev/null || grep VERSION_CODENAME /etc/os-release | cut -d= -f2)
 
-  # ── СТЪПКА 2: mssql-server repo (URL зависи от Ubuntu версията)
   if [ ! -f /etc/apt/sources.list.d/mssql-server-2025.list ]; then
     echo -e "${YELLOW}  [MSSQL] Добавяне на mssql-server repo за Ubuntu ${RELEASE_VERSION}...${NC}"
     MSSQL_LIST=$(curl -sSL "https://packages.microsoft.com/config/ubuntu/${RELEASE_VERSION}/mssql-server-2025.list")
@@ -421,7 +427,6 @@ elif [ "$db_type" = "mssql" ]; then
     fi
   fi
 
-  # ── СТЪПКА 3: msprod repo за mssql-tools (URL зависи от Ubuntu версията)
   if [ ! -f /etc/apt/sources.list.d/msprod.list ]; then
     printf 'deb [arch=amd64,arm64,armhf signed-by=/usr/share/keyrings/microsoft-prod.gpg] https://packages.microsoft.com/ubuntu/%s/prod %s main\n' \
       "$RELEASE_VERSION" "$UBUNTU_CODENAME" | sudo tee /etc/apt/sources.list.d/msprod.list >/dev/null
@@ -431,9 +436,6 @@ elif [ "$db_type" = "mssql" ]; then
   sudo apt-get update
   wait_apt_locks
 
-  # ── СТЪПКА 4: mssql-tools / mssql-tools18 (зависи от Ubuntu версията)
-  #   22.04 → mssql-tools  → /opt/mssql-tools/bin/sqlcmd
-  #   24.04 → mssql-tools18 → /opt/mssql-tools18/bin/sqlcmd
   if [ "$RELEASE_VERSION" = "22.04" ]; then
     SQLCMD_BIN=/opt/mssql-tools/bin/sqlcmd
     MSSQL_TOOLS_PKG="mssql-tools"
@@ -447,12 +449,10 @@ elif [ "$db_type" = "mssql" ]; then
     sudo ACCEPT_EULA=Y apt-get install -y "$MSSQL_TOOLS_PKG" unixodbc-dev
   fi
 
-  # ── СТЪПКА 4б: liblber-2.5.so.0 е нужна за mssql-server на Ubuntu 24.04
   if [ "$RELEASE_VERSION" = "24.04" ]; then
     sudo DEBIAN_FRONTEND=noninteractive apt-get install -y libldap-2.5-0 || true
   fi
 
-  # ── СТЪПКА 5: Инсталираме mssql-server ако не е наличен
   if ! systemctl status mssql-server >/dev/null 2>&1; then
     echo -e "${YELLOW}  [MSSQL] Сваляне и инсталиране на mssql-server (може 5–15 мин, изчакайте)...${NC}"
     wait_apt_locks
@@ -481,8 +481,6 @@ elif [ "$db_type" = "mssql" ]; then
     sudo systemctl restart mssql-server
   fi
 
-
-  # Изчакваме SQL Server да стартира (до ~2 мин)
   echo -e "${YELLOW}  [MSSQL] Изчакване SQL Server да приема връзки...${NC}"
   COUNTER=1
   ERRSTATUS=1
@@ -495,16 +493,33 @@ elif [ "$db_type" = "mssql" ]; then
   done
 
   if [ $ERRSTATUS -ne 0 ]; then
-    echo -e "${RED}  [MSSQL] Неуспешно свързване към локалния SQL Server след 24 опита. Проверете паролата (SA policy) и /var/opt/mssql/log/errorlog${NC}"
+    echo -e "${RED}  [MSSQL] Неуспешно свързване към локалния SQL Server след 24 опита.${NC}"
     exit 1
   fi
   echo -e "${YELLOW}  [MSSQL] SQL Server е на линия. Продължаваме с базата...${NC}"
 
-  # Създаваме login, база и db_owner потребител за nopCommerce
-  echo -e "${YELLOW}  [MSSQL] Създаване на login, база и db_owner потребител...${NC}"
   $SQLCMD_BIN -S localhost -U sa -P "$MSSQL_SA_PASSWORD" -C -Q "IF NOT EXISTS (SELECT * FROM sys.server_principals WHERE name = N'$database_user') CREATE LOGIN [$database_user] WITH PASSWORD = N'$database_password';"
   $SQLCMD_BIN -S localhost -U sa -P "$MSSQL_SA_PASSWORD" -C -Q "IF DB_ID(N'$database_name') IS NULL CREATE DATABASE [$database_name];"
   $SQLCMD_BIN -S localhost -U sa -P "$MSSQL_SA_PASSWORD" -C -d "$database_name" -Q "IF NOT EXISTS (SELECT * FROM sys.database_principals WHERE name = N'$database_user') CREATE USER [$database_user] FOR LOGIN [$database_user]; ALTER ROLE [db_owner] ADD MEMBER [$database_user];"
+
+  # --- Импорт на SQL в ПРАЗНАТА база (преди nopCommerce да стартира) ---
+  echo -e "${YELLOW}[DB] Сваляне на $db_sql_file...${NC}"
+  wget "$db_sql_url" -O "$db_sql_file"
+  echo -e "${YELLOW}[DB] Импорт на default данни в нова база (MSSQL)...${NC}"
+  if file "$db_sql_file" | grep -qi "utf-16\|unicode\|ucs-2"; then
+    echo -e "${YELLOW}  [MSSQL] Конвертиране на SQL файл от UTF-16 към UTF-8...${NC}"
+    iconv -f utf-16 -t utf-8 "$db_sql_file" > "${db_sql_file}.tmp" && mv "${db_sui_file}.tmp" "$db_sql_file"
+  fi
+  sed -i 's/\r//' "$db_sql_file"
+  awk 'found || /Object:.*[Tt]able/{found=1; print}' "$db_sql_file" > "${db_sql_file}.tmp" && mv "${db_sql_file}.tmp" "$db_sql_file"
+  $SQLCMD_BIN -S localhost -U sa -P "$database_password" -C -d "$database_name" -i "$db_sql_file"
+  echo -e "${YELLOW}[DB] Настройка на Store URL и admin акаунт...${NC}"
+  $SQLCMD_BIN -S localhost -U sa -P "$database_password" -C -d "$database_name" -Q "UPDATE [Store] SET [Url] = 'https://$domain_name/' WHERE [Id] = 1;"
+  $SQLCMD_BIN -S localhost -U sa -P "$database_password" -C -d "$database_name" -Q "UPDATE [Customer] SET [Username] = '$nopCommerceEmail' WHERE [Id] = 1;"
+  $SQLCMD_BIN -S localhost -U sa -P "$database_password" -C -d "$database_name" -Q "UPDATE [Customer] SET [Email] = '$nopCommerceEmail' WHERE [Id] = 1;"
+  $SQLCMD_BIN -S localhost -U sa -P "$database_password" -C -d "$database_name" -Q "UPDATE [CustomerPassword] SET [Password] = '$nopCommercePassword' WHERE [Id] = 1;"
+  $SQLCMD_BIN -S localhost -U sa -P "$database_password" -C -d "$database_name" -Q "UPDATE [CustomerPassword] SET [PasswordSalt] = '$nopCommercePasswordSalt' WHERE [Id] = 1;"
+  rm -f "$db_sql_file"
 fi
 
 echo -e "${YELLOW}[6/8] Сваляне и разархивиране на nopCommerce...${NC}"
@@ -514,7 +529,6 @@ wget "$nop_zip_url" -O nopCommerce.zip
 apt-get install -y unzip
 unzip -o -qq nopCommerce.zip
 
-# nopCommerce zip създава подпапка - преместваме файловете в корена
 if [ -d "$nop_zip_dir" ]; then
     mv "$nop_zip_dir"/* . 2>/dev/null || true
     mv "$nop_zip_dir"/.[!.]* . 2>/dev/null || true
@@ -528,7 +542,6 @@ chown -R www-data $nopcommerce_directory
 
 echo -e "${YELLOW}[7/8] Настройка на ограничен потребител (ако е подаден)...${NC}"
 
-# Ако е подаден ограничен потребител, го заключваме само в nopCommerce директорията (chroot + SFTP)
 if [ -n "$limited_user" ] && [ -n "$limited_user_password" ]; then
     echo -e "${YELLOW}Създаване на ограничен потребител $limited_user за достъп до $nopcommerce_directory...${NC}"
     if ! id "$limited_user" >/dev/null 2>&1; then
@@ -536,24 +549,19 @@ if [ -n "$limited_user" ] && [ -n "$limited_user_password" ]; then
     fi
     echo "$limited_user:$limited_user_password" | sudo chpasswd
 
-    # Специална група само за този сайт
     limited_group="nop_$domain_name"
     sudo groupadd -f "$limited_group"
 
-    # Добавяме www-data и ограничения потребител в групата
     sudo usermod -a -G "$limited_group" www-data
     sudo usermod -a -G "$limited_group" "$limited_user"
 
-    # Chroot директорията трябва да е root:root и не‑writable за група/others
     sudo chown root:root "$nopcommerce_directory"
     sudo chmod 755 "$nopcommerce_directory"
 
-    # Съдържанието вътре – достъпно за www-data и ограничения потребител чрез групата
     sudo chown -R www-data:"$limited_group" "$nopcommerce_directory"/*
     sudo find "$nopcommerce_directory" -mindepth 1 -type d -exec chmod 770 {} \;
     sudo find "$nopcommerce_directory" -mindepth 1 -type f -exec chmod 660 {} \;
 
-    # Настройка на sshd за chroot + SFTP-only за този потребител
     if ! grep -q "Match User $limited_user" /etc/ssh/sshd_config; then
         sudo tee -a /etc/ssh/sshd_config <<EOF_SSH
 Match User $limited_user
@@ -627,7 +635,7 @@ for i in $(seq 1 30); do
   sleep 1
 done
 
-# Изчакваме appsettings.json да се появи в App_Data (приложението го създава при първо стартиране)
+# Изчакваме appsettings.json да се появи в App_Data
 APPSETTINGS="$nopcommerce_directory/App_Data/appsettings.json"
 echo -e "${YELLOW}Изчакване на поява на appsettings.json в App_Data...${NC}"
 for i in $(seq 1 45); do
@@ -644,6 +652,13 @@ for i in $(seq 1 45); do
   sleep 2
 done
 
+# Спираме nopCommerce ПРЕДИ да редактираме appsettings.json —
+# ASP.NET Core следи файла (reloadOnChange: true) и при промяна
+# незабавно се свързва с базата и инициализира схемата, което
+# би конфликтирало с вече импортираните данни.
+echo -e "${YELLOW}Спиране на nopCommerce за безопасно редактиране на appsettings.json...${NC}"
+systemctl stop nopCommerce-$domain_name.service
+
 sed -i -z "s#\"ConnectionString\": \"\"#\"ConnectionString\": \"$connection_string\"#" "$APPSETTINGS"
 sed -i "s/sqlserver/$data_provider/" "$APPSETTINGS"
 
@@ -656,42 +671,8 @@ sed -i '/"HostingConfig": {/,/}/c\
     "KnownNetworks": null\
   },' "$APPSETTINGS"
 
-wget "$db_sql_url" -O "$db_sql_file"
-echo -e "${YELLOW}[DB] Импорт на default база и начални данни за $db_type...${NC}"
+# Стартираме nopCommerce с вече конфигурирана и попълнена база
+echo -e "${YELLOW}Стартиране на nopCommerce с финалната конфигурация...${NC}"
+systemctl start nopCommerce-$domain_name.service
 
-if [ "$db_type" = "postgres" ]; then
-  sudo -u postgres PGPASSWORD=$database_password psql -U "$database_user" -d "$database_name" -h localhost -f "$db_sql_file"
-  sudo -u postgres PGPASSWORD=$database_password psql -U "$database_user" -d "$database_name" -h localhost -c "UPDATE \"Store\" SET \"Url\" = 'https://$domain_name/' WHERE \"Id\" = 1;"
-  sudo -u postgres PGPASSWORD=$database_password psql -U "$database_user" -d "$database_name" -h localhost -c "UPDATE \"Customer\" SET \"Username\" = '$nopCommerceEmail' WHERE \"Id\" = 1;"
-  sudo -u postgres PGPASSWORD=$database_password psql -U "$database_user" -d "$database_name" -h localhost -c "UPDATE \"Customer\" SET \"Email\" = '$nopCommerceEmail' WHERE \"Id\" = 1;"
-  sudo -u postgres PGPASSWORD=$database_password psql -U "$database_user" -d "$database_name" -h localhost -c "UPDATE \"CustomerPassword\" SET \"Password\" = '$nopCommercePassword' WHERE \"Id\" = 1;"
-  sudo -u postgres PGPASSWORD=$database_password psql -U "$database_user" -d "$database_name" -h localhost -c "UPDATE \"CustomerPassword\" SET \"PasswordSalt\" = '$nopCommercePasswordSalt' WHERE \"Id\" = 1;"
-elif [ "$db_type" = "mysql" ]; then
-  sudo mysql "$database_name" < "$db_sql_file"
-  sudo mysql -e "UPDATE store SET Url = 'https://$domain_name/' WHERE Id = 1;" "$database_name"
-  sudo mysql -e "UPDATE customer SET Username = '$nopCommerceEmail' WHERE Id = 1;" "$database_name"
-  sudo mysql -e "UPDATE customer SET Email = '$nopCommerceEmail' WHERE Id = 1;" "$database_name"
-  sudo mysql -e "UPDATE customerpassword SET Password = '$nopCommercePassword' WHERE Id = 1;" "$database_name"
-  sudo mysql -e "UPDATE customerpassword SET PasswordSalt = '$nopCommercePasswordSalt' WHERE Id = 1;" "$database_name"
-elif [ "$db_type" = "mssql" ]; then
-  # SSMS генерира SQL файлове в UTF-16 LE — конвертираме към UTF-8 преди да пипаме с awk/sed
-  if file "$db_sql_file" | grep -qi "utf-16\|unicode\|ucs-2"; then
-    echo -e "${YELLOW}  [MSSQL] Конвертиране на SQL файл от UTF-16 към UTF-8...${NC}"
-    iconv -f utf-16 -t utf-8 "$db_sql_file" > "${db_sql_file}.tmp" && mv "${db_sql_file}.tmp" "$db_sql_file"
-  fi
-  # Конвертираме CRLF → LF
-  sed -i 's/\r//' "$db_sql_file"
-  # Изтриваме целия header (CREATE DATABASE, ALTER DATABASE, USE, sp_db_vardecimal_storage_format и т.н.)
-  # и стартираме от Object-коментара на първата таблица — пропускаме "Object: Database" блока
-  awk 'found || /Object:.*[Tt]able/{found=1; print}' "$db_sql_file" > "${db_sql_file}.tmp" && mv "${db_sql_file}.tmp" "$db_sql_file"
-  $SQLCMD_BIN -S localhost -U sa -P "$database_password" -C -d "$database_name" -i "$db_sql_file"
-  $SQLCMD_BIN -S localhost -U sa -P "$database_password" -C -d "$database_name" -Q "UPDATE [Store] SET [Url] = 'https://$domain_name/' WHERE [Id] = 1;"
-  $SQLCMD_BIN -S localhost -U sa -P "$database_password" -C -d "$database_name" -Q "UPDATE [Customer] SET [Username] = '$nopCommerceEmail' WHERE [Id] = 1;"
-  $SQLCMD_BIN -S localhost -U sa -P "$database_password" -C -d "$database_name" -Q "UPDATE [Customer] SET [Email] = '$nopCommerceEmail' WHERE [Id] = 1;"
-  $SQLCMD_BIN -S localhost -U sa -P "$database_password" -C -d "$database_name" -Q "UPDATE [CustomerPassword] SET [Password] = '$nopCommercePassword' WHERE [Id] = 1;"
-  $SQLCMD_BIN -S localhost -U sa -P "$database_password" -C -d "$database_name" -Q "UPDATE [CustomerPassword] SET [PasswordSalt] = '$nopCommercePasswordSalt' WHERE [Id] = 1;"
-fi
-
-rm "$db_sql_file"
-
-systemctl restart nopCommerce-$domain_name.service
+echo -e "${YELLOW}Деплойментът приключи успешно! Магазинът е достъпен на: https://$domain_name${NC}"
