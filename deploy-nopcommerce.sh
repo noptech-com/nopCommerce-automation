@@ -349,16 +349,17 @@ if [ "$db_type" = "postgres" ]; then
 
   # --- Импорт на SQL в ПРАЗНАТА база (преди nopCommerce да стартира) ---
   echo -e "${YELLOW}[DB] Сваляне на $db_sql_file...${NC}"
-  wget "$db_sql_url" -O "$db_sql_file"
+  wget "$db_sql_url" -O "/tmp/$db_sql_file"
+  chmod 644 "/tmp/$db_sql_file"
   echo -e "${YELLOW}[DB] Импорт на default данни в нова база (PostgreSQL)...${NC}"
-  sudo -u postgres PGPASSWORD=$database_password psql -U "$database_user" -d "$database_name" -h localhost -f "$db_sql_file"
+  sudo -u postgres PGPASSWORD=$database_password psql -U "$database_user" -d "$database_name" -h localhost -f "/tmp/$db_sql_file"
   echo -e "${YELLOW}[DB] Настройка на Store URL и admin акаунт...${NC}"
   sudo -u postgres PGPASSWORD=$database_password psql -U "$database_user" -d "$database_name" -h localhost -c "UPDATE \"Store\" SET \"Url\" = 'https://$domain_name/' WHERE \"Id\" = 1;"
   sudo -u postgres PGPASSWORD=$database_password psql -U "$database_user" -d "$database_name" -h localhost -c "UPDATE \"Customer\" SET \"Username\" = '$nopCommerceEmail' WHERE \"Id\" = 1;"
   sudo -u postgres PGPASSWORD=$database_password psql -U "$database_user" -d "$database_name" -h localhost -c "UPDATE \"Customer\" SET \"Email\" = '$nopCommerceEmail' WHERE \"Id\" = 1;"
   sudo -u postgres PGPASSWORD=$database_password psql -U "$database_user" -d "$database_name" -h localhost -c "UPDATE \"CustomerPassword\" SET \"Password\" = '$nopCommercePassword' WHERE \"Id\" = 1;"
   sudo -u postgres PGPASSWORD=$database_password psql -U "$database_user" -d "$database_name" -h localhost -c "UPDATE \"CustomerPassword\" SET \"PasswordSalt\" = '$nopCommercePasswordSalt' WHERE \"Id\" = 1;"
-  rm -f "$db_sql_file"
+  rm -f "/tmp/$db_sql_file"
 
 elif [ "$db_type" = "mysql" ]; then
   sudo DEBIAN_FRONTEND=noninteractive apt-get install -y mysql-server
@@ -388,16 +389,17 @@ EOF
 
   # --- Импорт на SQL в ПРАЗНАТА база (преди nopCommerce да стартира) ---
   echo -e "${YELLOW}[DB] Сваляне на $db_sql_file...${NC}"
-  wget "$db_sql_url" -O "$db_sql_file"
+  wget "$db_sql_url" -O "/tmp/$db_sql_file"
+  chmod 644 "/tmp/$db_sql_file"
   echo -e "${YELLOW}[DB] Импорт на default данни в нова база (MySQL)...${NC}"
-  sudo mysql "$database_name" < "$db_sql_file"
+  sudo mysql "$database_name" < "/tmp/$db_sql_file"
   echo -e "${YELLOW}[DB] Настройка на Store URL и admin акаунт...${NC}"
   sudo mysql -e "UPDATE store SET Url = 'https://$domain_name/' WHERE Id = 1;" "$database_name"
   sudo mysql -e "UPDATE customer SET Username = '$nopCommerceEmail' WHERE Id = 1;" "$database_name"
   sudo mysql -e "UPDATE customer SET Email = '$nopCommerceEmail' WHERE Id = 1;" "$database_name"
   sudo mysql -e "UPDATE customerpassword SET Password = '$nopCommercePassword' WHERE Id = 1;" "$database_name"
   sudo mysql -e "UPDATE customerpassword SET PasswordSalt = '$nopCommercePasswordSalt' WHERE Id = 1;" "$database_name"
-  rm -f "$db_sql_file"
+  rm -f "/tmp/$db_sql_file"
 
 elif [ "$db_type" = "mssql" ]; then
   echo -e "${YELLOW}  [MSSQL] Инсталиране и настройка на SQL Server (Express) за MSSQL база...${NC}"
@@ -504,22 +506,23 @@ elif [ "$db_type" = "mssql" ]; then
 
   # --- Импорт на SQL в ПРАЗНАТА база (преди nopCommerce да стартира) ---
   echo -e "${YELLOW}[DB] Сваляне на $db_sql_file...${NC}"
-  wget "$db_sql_url" -O "$db_sql_file"
+  wget "$db_sql_url" -O "/tmp/$db_sql_file"
+  chmod 644 "/tmp/$db_sql_file"
   echo -e "${YELLOW}[DB] Импорт на default данни в нова база (MSSQL)...${NC}"
-  if file "$db_sql_file" | grep -qi "utf-16\|unicode\|ucs-2"; then
+  if file "/tmp/$db_sql_file" | grep -qi "utf-16\|unicode\|ucs-2"; then
     echo -e "${YELLOW}  [MSSQL] Конвертиране на SQL файл от UTF-16 към UTF-8...${NC}"
-    iconv -f utf-16 -t utf-8 "$db_sql_file" > "${db_sql_file}.tmp" && mv "${db_sui_file}.tmp" "$db_sql_file"
+    iconv -f utf-16 -t utf-8 "/tmp/$db_sql_file" > "/tmp/${db_sql_file}.tmp" && mv "/tmp/${db_sql_file}.tmp" "/tmp/$db_sql_file"
   fi
-  sed -i 's/\r//' "$db_sql_file"
-  awk 'found || /Object:.*[Tt]able/{found=1; print}' "$db_sql_file" > "${db_sql_file}.tmp" && mv "${db_sql_file}.tmp" "$db_sql_file"
-  $SQLCMD_BIN -S localhost -U sa -P "$database_password" -C -d "$database_name" -i "$db_sql_file"
+  sed -i 's/\r//' "/tmp/$db_sql_file"
+  awk 'found || /Object:.*[Tt]able/{found=1; print}' "/tmp/$db_sql_file" > "/tmp/${db_sql_file}.tmp" && mv "/tmp/${db_sql_file}.tmp" "/tmp/$db_sql_file"
+  $SQLCMD_BIN -S localhost -U sa -P "$database_password" -C -d "$database_name" -i "/tmp/$db_sql_file"
   echo -e "${YELLOW}[DB] Настройка на Store URL и admin акаунт...${NC}"
   $SQLCMD_BIN -S localhost -U sa -P "$database_password" -C -d "$database_name" -Q "UPDATE [Store] SET [Url] = 'https://$domain_name/' WHERE [Id] = 1;"
   $SQLCMD_BIN -S localhost -U sa -P "$database_password" -C -d "$database_name" -Q "UPDATE [Customer] SET [Username] = '$nopCommerceEmail' WHERE [Id] = 1;"
   $SQLCMD_BIN -S localhost -U sa -P "$database_password" -C -d "$database_name" -Q "UPDATE [Customer] SET [Email] = '$nopCommerceEmail' WHERE [Id] = 1;"
   $SQLCMD_BIN -S localhost -U sa -P "$database_password" -C -d "$database_name" -Q "UPDATE [CustomerPassword] SET [Password] = '$nopCommercePassword' WHERE [Id] = 1;"
   $SQLCMD_BIN -S localhost -U sa -P "$database_password" -C -d "$database_name" -Q "UPDATE [CustomerPassword] SET [PasswordSalt] = '$nopCommercePasswordSalt' WHERE [Id] = 1;"
-  rm -f "$db_sql_file"
+  rm -f "/tmp/$db_sql_file"
 fi
 
 echo -e "${YELLOW}[6/8] Сваляне и разархивиране на nopCommerce...${NC}"
